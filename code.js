@@ -17,9 +17,9 @@ function colorToRgba(color, opacity = 1) {
 
 // 序列化 paint（fills/strokes）
 function serializePaint(paint) {
-  const base = { type: paint.type, opacity: paint.opacity ?? 1, visible: paint.visible ?? true };
+  const base = { type: paint.type, opacity: paint.opacity !== undefined ? paint.opacity : 1, visible: paint.visible !== undefined ? paint.visible : true };
   if (paint.type === "SOLID") {
-    return { ...base, color: colorToRgba(paint.color, paint.opacity ?? 1) };
+    return { ...base, color: colorToRgba(paint.color, paint.opacity !== undefined ? paint.opacity : 1) };
   }
   if (paint.type.includes("GRADIENT")) {
     return {
@@ -40,7 +40,7 @@ function serializePaint(paint) {
 function serializeEffect(effect) {
   return {
     type: effect.type,
-    visible: effect.visible ?? true,
+    visible: effect.visible !== undefined ? effect.visible : true,
     radius: effect.radius,
     color: effect.color ? colorToRgba(effect.color) : undefined,
     offset: effect.offset,
@@ -54,7 +54,7 @@ function serializeNode(node) {
     id: node.id,
     name: node.name,
     type: node.type,
-    visible: node.visible ?? true,
+    visible: node.visible !== undefined ? node.visible : true,
   };
 
   // 几何属性
