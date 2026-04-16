@@ -1,42 +1,47 @@
-// Figma JSON Exporter - 主逻辑
-// 导出选中节点的完整 JSON + 图片资源
+// Figma JSON Exporter - 纯 ES5，兼容 Figma 插件沙箱
 
 figma.showUI(__html__, { width: 360, height: 280, title: "JSON Exporter" });
 
 // ── 工具函数 ──────────────────────────────────────────────────────────────
 
-// 把 Figma 颜色对象转成 rgba 字符串
-function colorToRgba(color, opacity = 1) {
+function colorToRgba(color, opacity) {
   if (!color) return null;
-  const r = Math.round(color.r * 255);
-  const g = Math.round(color.g * 255);
-  const b = Math.round(color.b * 255);
-  const a = (color.a !== undefined ? color.a : 1) * opacity;
-  return `rgba(${r},${g},${b},${a.toFixed(2)})`;
+  var op = opacity !== undefined ? opacity : 1;
+  var r = Math.round(color.r * 255);
+  var g = Math.round(color.g * 255);
+  var b = Math.round(color.b * 255);
+  var a = (color.a !== undefined ? color.a : 1) * op;
+  return "rgba(" + r + "," + g + "," + b + "," + a.toFixed(2) + ")";
 }
 
-// 序列化 paint（fills/strokes）
 function serializePaint(paint) {
-  const base = { type: paint.type, opacity: paint.opacity !== undefined ? paint.opacity : 1, visible: paint.visible !== undefined ? paint.visible : true };
+  var opacity = paint.opacity !== undefined ? paint.opacity : 1;
+  var visible = paint.visible !== undefined ? paint.visible : true;
+  var base = { type: paint.type, opacity: opacity, visible: visible };
+
   if (paint.type === "SOLID") {
-    return { ...base, color: colorToRgba(paint.color, paint.opacity !== undefined ? paint.opacity : 1) };
+    base.color = colorToRgba(paint.color, opacity);
+    return base;
   }
-  if (paint.type.includes("GRADIENT")) {
-    return {
-      ...base,
-      gradientStops: paint.gradientStops?.map(s => ({
-        position: s.position,
-        color: colorToRgba(s.color),
-      })),
-    };
+  if (paint.type.indexOf("GRADIENT") !== -1) {
+    var stops = [];
+    if (paint.gradientStops) {
+      for (var i = 0; i < paint.gradientStops.length; i++) {
+        var s = paint.gradientStops[i];
+        stops.push({ position: s.position, color: colorToRgba(s.color) });
+      }
+    }
+    base.gradientStops = stops;
+    return base;
   }
   if (paint.type === "IMAGE") {
-    return { ...base, imageHash: paint.imageHash, scaleMode: paint.scaleMode };
+    base.imageHash = paint.imageHash;
+    base.scaleMode = paint.scaleMode;
+    return base;
   }
   return base;
 }
 
-// 序列化效果（shadows, blur）
 function serializeEffect(effect) {
   return {
     type: effect.type,
@@ -44,20 +49,18 @@ function serializeEffect(effect) {
     radius: effect.radius,
     color: effect.color ? colorToRgba(effect.color) : undefined,
     offset: effect.offset,
-    spread: effect.spread,
+    spread: effect.spread
   };
 }
 
-// 递归序列化节点
 function serializeNode(node) {
-  const base = {
+  var base = {
     id: node.id,
     name: node.name,
     type: node.type,
-    visible: node.visible !== undefined ? node.visible : true,
+    visible: node.visible !== undefined ? node.visible : true
   };
 
-  // 几何属性
   if ("x" in node) base.x = Math.round(node.x);
   if ("y" in node) base.y = Math.round(node.y);
   if ("width" in node) base.width = Math.round(node.width);
@@ -71,36 +74,35 @@ function serializeNode(node) {
       topLeft: node.topLeftRadius,
       topRight: node.topRightRadius,
       bottomRight: node.bottomRightRadius,
-      bottomLeft: node.bottomLeftRadius,
+      bottomLeft: node.bottomLeftRadius
     };
   }
 
-  // 填充 & 描边
   if ("fills" in node && node.fills !== figma.mixed) {
-    base.fills = node.fills.map(serializePaint);
+    var fills = [];
+    for (var i = 0; i < node.fills.length; i++) fills.push(serializePaint(node.fills[i]));
+    base.fills = fills;
   }
   if ("strokes" in node) {
-    base.strokes = node.strokes.map(serializePaint);
+    var strokes = [];
+    for (var i = 0; i < node.strokes.length; i++) strokes.push(serializePaint(node.strokes[i]));
+    base.strokes = strokes;
     base.strokeWeight = node.strokeWeight;
     base.strokeAlign = node.strokeAlign;
   }
 
-  // 效果
   if ("effects" in node && node.effects.length > 0) {
-    base.effects = node.effects.map(serializeEffect);
+    var effects = [];
+    for (var i = 0; i < node.effects.length; i++) effects.push(serializeEffect(node.effects[i]));
+    base.effects = effects;
   }
 
-  // 约束
-  if ("constraints" in node) {
-    base.constraints = node.constraints;
-  }
+  if ("constraints" in node) base.constraints = node.constraints;
 
-  // 文字
   if (node.type === "TEXT") {
     base.characters = node.characters;
     base.fontSize = node.fontSize !== figma.mixed ? node.fontSize : "mixed";
     base.fontName = node.fontName !== figma.mixed ? node.fontName : "mixed";
-    base.fontWeight = node.fontName !== figma.mixed ? node.fontName.style : "mixed";
     base.textAlignHorizontal = node.textAlignHorizontal;
     base.textAlignVertical = node.textAlignVertical;
     base.lineHeight = node.lineHeight !== figma.mixed ? node.lineHeight : "mixed";
@@ -108,7 +110,6 @@ function serializeNode(node) {
     base.textDecoration = node.textDecoration !== figma.mixed ? node.textDecoration : "mixed";
   }
 
-  // Auto Layout
   if ("layoutMode" in node && node.layoutMode !== "NONE") {
     base.autoLayout = {
       mode: node.layoutMode,
@@ -120,20 +121,20 @@ function serializeNode(node) {
       primaryAxisAlignItems: node.primaryAxisAlignItems,
       counterAxisAlignItems: node.counterAxisAlignItems,
       primaryAxisSizingMode: node.primaryAxisSizingMode,
-      counterAxisSizingMode: node.counterAxisSizingMode,
+      counterAxisSizingMode: node.counterAxisSizingMode
     };
   }
 
-  // 组件引用
   if (node.type === "INSTANCE") {
-    base.componentId = node.mainComponent?.id;
-    base.componentName = node.mainComponent?.name;
+    base.componentId = node.mainComponent ? node.mainComponent.id : null;
+    base.componentName = node.mainComponent ? node.mainComponent.name : null;
   }
 
-  // 图片哈希收集（用于后续 exportAsync）
-  const imageHashes = [];
+  // 收集图片哈希
+  var imageHashes = [];
   if ("fills" in node && node.fills !== figma.mixed) {
-    for (const fill of node.fills) {
+    for (var i = 0; i < node.fills.length; i++) {
+      var fill = node.fills[i];
       if (fill.type === "IMAGE" && fill.imageHash) {
         imageHashes.push(fill.imageHash);
       }
@@ -141,30 +142,38 @@ function serializeNode(node) {
   }
   if (imageHashes.length > 0) base._imageHashes = imageHashes;
 
-  // 递归子节点
   if ("children" in node) {
-    base.children = node.children.map(serializeNode);
+    var children = [];
+    for (var i = 0; i < node.children.length; i++) {
+      children.push(serializeNode(node.children[i]));
+    }
+    base.children = children;
   }
 
   return base;
 }
 
-// 收集所有图片哈希
 function collectImageHashes(nodeJson) {
-  const hashes = new Set();
+  var hashes = {};
   function walk(n) {
-    if (n._imageHashes) n._imageHashes.forEach(h => hashes.add(h));
-    if (n.children) n.children.forEach(walk);
+    if (n._imageHashes) {
+      for (var i = 0; i < n._imageHashes.length; i++) {
+        hashes[n._imageHashes[i]] = true;
+      }
+    }
+    if (n.children) {
+      for (var i = 0; i < n.children.length; i++) walk(n.children[i]);
+    }
   }
   walk(nodeJson);
-  return [...hashes];
+  return Object.keys(hashes);
 }
 
 // ── 消息处理 ──────────────────────────────────────────────────────────────
 
-figma.ui.onmessage = async (msg) => {
+figma.ui.onmessage = function(msg) {
   if (msg.type === "export") {
-    const selection = figma.currentPage.selection;
+    var selection = figma.currentPage.selection;
     if (selection.length === 0) {
       figma.ui.postMessage({ type: "error", message: "请先选中至少一个节点" });
       return;
@@ -172,49 +181,68 @@ figma.ui.onmessage = async (msg) => {
 
     figma.ui.postMessage({ type: "progress", message: "正在序列化节点..." });
 
-    // 序列化所有选中节点
-    const nodes = selection.map(serializeNode);
-    const exportData = {
+    var nodes = [];
+    for (var i = 0; i < selection.length; i++) {
+      nodes.push(serializeNode(selection[i]));
+    }
+
+    var exportData = {
       meta: {
         exportedAt: new Date().toISOString(),
         figmaFileName: figma.root.name,
         pageId: figma.currentPage.id,
         pageName: figma.currentPage.name,
-        nodeCount: selection.length,
+        nodeCount: selection.length
       },
-      nodes,
+      nodes: nodes,
+      images: {}
     };
 
     // 收集所有图片哈希
-    const allHashes = new Set();
-    nodes.forEach(n => collectImageHashes(n).forEach(h => allHashes.add(h)));
+    var allHashes = {};
+    for (var i = 0; i < nodes.length; i++) {
+      var hs = collectImageHashes(nodes[i]);
+      for (var j = 0; j < hs.length; j++) allHashes[hs[j]] = true;
+    }
+    var hashList = Object.keys(allHashes);
 
-    // 导出图片
-    const images = {};
-    if (allHashes.size > 0) {
-      figma.ui.postMessage({ type: "progress", message: `导出图片资源 (${allHashes.size} 张)...` });
-      for (const hash of allHashes) {
-        try {
-          const image = figma.getImageByHash(hash);
-          if (image) {
-            const bytes = await image.getBytesAsync();
-            // 转 base64
-            let binary = "";
-            for (let i = 0; i < bytes.length; i++) {
-              binary += String.fromCharCode(bytes[i]);
-            }
-            images[hash] = "data:image/png;base64," + btoa(binary);
-          }
-        } catch (e) {
-          console.warn(`图片导出失败 ${hash}: ${e}`);
-        }
-      }
+    if (hashList.length === 0) {
+      figma.ui.postMessage({ type: "done", data: exportData });
+      return;
     }
 
-    exportData.images = images;
+    figma.ui.postMessage({ type: "progress", message: "导出图片资源 (" + hashList.length + " 张)..." });
 
-    figma.ui.postMessage({ type: "progress", message: "准备下载..." });
-    figma.ui.postMessage({ type: "done", data: exportData });
+    // 逐个导出图片（async 递归）
+    var imageResults = {};
+    var index = 0;
+
+    function exportNext() {
+      if (index >= hashList.length) {
+        exportData.images = imageResults;
+        figma.ui.postMessage({ type: "done", data: exportData });
+        return;
+      }
+      var hash = hashList[index];
+      index++;
+      var image = figma.getImageByHash(hash);
+      if (!image) {
+        exportNext();
+        return;
+      }
+      image.getBytesAsync().then(function(bytes) {
+        var binary = "";
+        for (var k = 0; k < bytes.length; k++) {
+          binary += String.fromCharCode(bytes[k]);
+        }
+        imageResults[hash] = "data:image/png;base64," + btoa(binary);
+        exportNext();
+      }).catch(function() {
+        exportNext();
+      });
+    }
+
+    exportNext();
   }
 
   if (msg.type === "cancel") {
