@@ -43,14 +43,15 @@ function serializePaint(paint) {
 }
 
 function serializeEffect(effect) {
-  return {
+  var obj = {
     type: effect.type,
     visible: effect.visible !== undefined ? effect.visible : true,
-    radius: effect.radius,
-    color: effect.color ? colorToRgba(effect.color) : undefined,
-    offset: effect.offset,
-    spread: effect.spread
+    radius: effect.radius
   };
+  if (effect.color) obj.color = colorToRgba(effect.color);
+  if (effect.offset) obj.offset = effect.offset;
+  if (effect.spread !== undefined) obj.spread = effect.spread;
+  return obj;
 }
 
 function serializeNode(node) {
@@ -207,7 +208,8 @@ figma.ui.onmessage = function(msg) {
     var hashList = Object.keys(allHashes);
 
     if (hashList.length === 0) {
-      figma.ui.postMessage({ type: "done", data: exportData });
+      var cleanData0 = JSON.parse(JSON.stringify(exportData));
+      figma.ui.postMessage({ type: "done", data: cleanData0 });
       return;
     }
 
@@ -220,7 +222,8 @@ figma.ui.onmessage = function(msg) {
     function exportNext() {
       if (index >= hashList.length) {
         exportData.images = imageResults;
-        figma.ui.postMessage({ type: "done", data: exportData });
+        var cleanData = JSON.parse(JSON.stringify(exportData));
+        figma.ui.postMessage({ type: "done", data: cleanData });
         return;
       }
       var hash = hashList[index];
