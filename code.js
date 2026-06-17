@@ -17,13 +17,14 @@ function colorToRgba(color, opacity) {
 function serializePaint(paint) {
   var opacity = paint.opacity !== undefined ? paint.opacity : 1;
   var visible = paint.visible !== undefined ? paint.visible : true;
-  var base = { type: paint.type, opacity: opacity, visible: visible };
+  var type = paint.type;
+  var base = { type: type, opacity: opacity, visible: visible };
 
-  if (paint.type === "SOLID") {
+  if (type === "SOLID") {
     base.color = colorToRgba(paint.color, opacity);
     return base;
   }
-  if (paint.type.indexOf("GRADIENT") !== -1) {
+  if (type.indexOf("GRADIENT") !== -1) {
     var stops = [];
     if (paint.gradientStops) {
       for (var i = 0; i < paint.gradientStops.length; i++) {
@@ -34,7 +35,7 @@ function serializePaint(paint) {
     base.gradientStops = stops;
     return base;
   }
-  if (paint.type === "IMAGE") {
+  if (type === "IMAGE") {
     base.imageHash = paint.imageHash;
     base.scaleMode = paint.scaleMode;
     return base;
@@ -49,106 +50,219 @@ function serializeEffect(effect) {
     radius: effect.radius
   };
   if (effect.color) obj.color = colorToRgba(effect.color);
-  if (effect.offset) obj.offset = effect.offset;
+  if (effect.offset) {
+    obj.offset = {
+      x: effect.offset.x,
+      y: effect.offset.y
+    };
+  }
   if (effect.spread !== undefined) obj.spread = effect.spread;
   return obj;
 }
 
-function serializeNode(node) {
+function hasProp(node, prop) {
+  try {
+    return prop in node;
+  } catch (e) {
+    return false;
+  }
+}
+
+function readProp(node, prop, fallback) {
+  try {
+    var value = node[prop];
+    return value !== undefined ? value : fallback;
+  } catch (e) {
+    return fallback;
+  }
+}
+
+function isMixed(value) {
+  return value === figma.mixed || value === "Symbol(mixed)";
+}
+
+function serializeMixedValue(value) {
+  return isMixed(value) ? "mixed" : value;
+}
+
+function serializeFontName(fontName) {
+  if (!fontName || isMixed(fontName)) return "mixed";
+  return {
+    family: readProp(fontName, "family", ""),
+    style: readProp(fontName, "style", "")
+  };
+}
+
+function serializeLineHeight(lineHeight) {
+  if (!lineHeight || isMixed(lineHeight)) return "mixed";
+  return {
+    unit: readProp(lineHeight, "unit", "AUTO"),
+    value: readProp(lineHeight, "value", null)
+  };
+}
+
+function serializeLetterSpacing(letterSpacing) {
+  if (!letterSpacing || isMixed(letterSpacing)) return "mixed";
+  return {
+    unit: readProp(letterSpacing, "unit", "PIXELS"),
+    value: readProp(letterSpacing, "value", 0)
+  };
+}
+
+function serializeLayoutValue(value) {
+  if (isMixed(value)) return "mixed";
+  return value;
+}
+
+function serializeConstraints(constraints) {
+  if (!constraints || isMixed(constraints)) return null;
+  return {
+    horizontal: readProp(constraints, "horizontal", "MIN"),
+    vertical: readProp(constraints, "vertical", "MIN")
+  };
+}
+
+function serializePaintList(node, prop) {
+  var paints = readProp(node, prop, null);
+  if (!paints || isMixed(paints)) return null;
+
+  var result = [];
+  for (var i = 0; i < paints.length; i++) result.push(serializePaint(paints[i]));
+  return result;
+}
+
+function collectImageHashesFromNode(node) {
+  var hashes = [];
+  var fills = readProp(node, "fills", null);
+  if (!fills || isMixed(fills)) return hashes;
+
+  for (var i = 0; i < fills.length; i++) {
+    var fill = fills[i];
+    if (fill.type === "IMAGE" && fill.imageHash) hashes.push(fill.imageHash);
+  }
+  return hashes;
+}
+
+function serializeNodeBase(node) {
   var base = {
-    id: node.id,
-    name: node.name,
-    type: node.type,
-    visible: node.visible !== undefined ? node.visible : true
+    id: readProp(node, "id", ""),
+    name: readProp(node, "name", ""),
+    type: readProp(node, "type", "UNKNOWN"),
+    visible: readProp(node, "visible", true)
   };
 
-  if ("x" in node) base.x = Math.round(node.x);
-  if ("y" in node) base.y = Math.round(node.y);
-  if ("width" in node) base.width = Math.round(node.width);
-  if ("height" in node) base.height = Math.round(node.height);
-  if ("rotation" in node) base.rotation = node.rotation;
-  if ("opacity" in node) base.opacity = node.opacity;
-  if ("blendMode" in node) base.blendMode = node.blendMode;
-  if ("cornerRadius" in node) base.cornerRadius = node.cornerRadius;
-  if ("topLeftRadius" in node) {
+  if (hasProp(node, "x")) base.x = Math.round(readProp(node, "x", 0));
+  if (hasProp(node, "y")) base.y = Math.round(readProp(node, "y", 0));
+  if (hasProp(node, "width")) base.width = Math.round(readProp(node, "width", 0));
+  if (hasProp(node, "height")) base.height = Math.round(readProp(node, "height", 0));
+  if (hasProp(node, "rotation")) base.rotation = readProp(node, "rotation", 0);
+  if (hasProp(node, "opacity")) base.opacity = readProp(node, "opacity", 1);
+  if (hasProp(node, "blendMode")) base.blendMode = readProp(node, "blendMode", "PASS_THROUGH");
+  if (hasProp(node, "cornerRadius")) base.cornerRadius = serializeMixedValue(readProp(node, "cornerRadius", 0));
+  if (hasProp(node, "topLeftRadius")) {
     base.cornerRadii = {
-      topLeft: node.topLeftRadius,
-      topRight: node.topRightRadius,
-      bottomRight: node.bottomRightRadius,
-      bottomLeft: node.bottomLeftRadius
+      topLeft: readProp(node, "topLeftRadius", 0),
+      topRight: readProp(node, "topRightRadius", 0),
+      bottomRight: readProp(node, "bottomRightRadius", 0),
+      bottomLeft: readProp(node, "bottomLeftRadius", 0)
     };
   }
 
-  if ("fills" in node && node.fills !== figma.mixed) {
-    var fills = [];
-    for (var i = 0; i < node.fills.length; i++) fills.push(serializePaint(node.fills[i]));
-    base.fills = fills;
-  }
-  if ("strokes" in node) {
-    var strokes = [];
-    for (var i = 0; i < node.strokes.length; i++) strokes.push(serializePaint(node.strokes[i]));
+  var fills = serializePaintList(node, "fills");
+  if (fills) base.fills = fills;
+
+  var strokes = serializePaintList(node, "strokes");
+  if (strokes) {
     base.strokes = strokes;
-    base.strokeWeight = node.strokeWeight;
-    base.strokeAlign = node.strokeAlign;
+    base.strokeWeight = serializeMixedValue(readProp(node, "strokeWeight", 0));
+    base.strokeAlign = readProp(node, "strokeAlign", "CENTER");
   }
 
-  if ("effects" in node && node.effects.length > 0) {
-    var effects = [];
-    for (var i = 0; i < node.effects.length; i++) effects.push(serializeEffect(node.effects[i]));
-    base.effects = effects;
+  var effects = readProp(node, "effects", null);
+  if (effects && !isMixed(effects) && effects.length > 0) {
+    base.effects = [];
+    for (var i = 0; i < effects.length; i++) base.effects.push(serializeEffect(effects[i]));
   }
 
-  if ("constraints" in node) base.constraints = node.constraints;
+  var constraints = serializeConstraints(readProp(node, "constraints", null));
+  if (constraints) base.constraints = constraints;
 
-  if (node.type === "TEXT") {
-    base.characters = node.characters;
-    base.fontSize = node.fontSize !== figma.mixed ? node.fontSize : "mixed";
-    base.fontName = node.fontName !== figma.mixed ? node.fontName : "mixed";
-    base.textAlignHorizontal = node.textAlignHorizontal;
-    base.textAlignVertical = node.textAlignVertical;
-    base.lineHeight = node.lineHeight !== figma.mixed ? node.lineHeight : "mixed";
-    base.letterSpacing = node.letterSpacing !== figma.mixed ? node.letterSpacing : "mixed";
-    base.textDecoration = node.textDecoration !== figma.mixed ? node.textDecoration : "mixed";
+  if (base.type === "TEXT") {
+    base.characters = readProp(node, "characters", "");
+    base.fontSize = serializeMixedValue(readProp(node, "fontSize", "mixed"));
+    base.fontName = serializeFontName(readProp(node, "fontName", null));
+    base.textAlignHorizontal = readProp(node, "textAlignHorizontal", "LEFT");
+    base.textAlignVertical = readProp(node, "textAlignVertical", "TOP");
+    base.lineHeight = serializeLineHeight(readProp(node, "lineHeight", null));
+    base.letterSpacing = serializeLetterSpacing(readProp(node, "letterSpacing", null));
+    base.textDecoration = serializeMixedValue(readProp(node, "textDecoration", "mixed"));
   }
 
-  if ("layoutMode" in node && node.layoutMode !== "NONE") {
+  var layoutMode = readProp(node, "layoutMode", "NONE");
+  if (hasProp(node, "layoutMode") && layoutMode !== "NONE") {
     base.autoLayout = {
-      mode: node.layoutMode,
-      paddingLeft: node.paddingLeft,
-      paddingRight: node.paddingRight,
-      paddingTop: node.paddingTop,
-      paddingBottom: node.paddingBottom,
-      itemSpacing: node.itemSpacing,
-      primaryAxisAlignItems: node.primaryAxisAlignItems,
-      counterAxisAlignItems: node.counterAxisAlignItems,
-      primaryAxisSizingMode: node.primaryAxisSizingMode,
-      counterAxisSizingMode: node.counterAxisSizingMode
+      mode: layoutMode,
+      paddingLeft: serializeLayoutValue(readProp(node, "paddingLeft", 0)),
+      paddingRight: serializeLayoutValue(readProp(node, "paddingRight", 0)),
+      paddingTop: serializeLayoutValue(readProp(node, "paddingTop", 0)),
+      paddingBottom: serializeLayoutValue(readProp(node, "paddingBottom", 0)),
+      itemSpacing: serializeLayoutValue(readProp(node, "itemSpacing", 0)),
+      primaryAxisAlignItems: readProp(node, "primaryAxisAlignItems", "MIN"),
+      counterAxisAlignItems: readProp(node, "counterAxisAlignItems", "MIN"),
+      primaryAxisSizingMode: readProp(node, "primaryAxisSizingMode", "AUTO"),
+      counterAxisSizingMode: readProp(node, "counterAxisSizingMode", "AUTO")
     };
   }
 
-  if (node.type === "INSTANCE") {
-    base.componentId = node.mainComponent ? node.mainComponent.id : null;
-    base.componentName = node.mainComponent ? node.mainComponent.name : null;
-  }
-
-  // 收集图片哈希
-  var imageHashes = [];
-  if ("fills" in node && node.fills !== figma.mixed) {
-    for (var i = 0; i < node.fills.length; i++) {
-      var fill = node.fills[i];
-      if (fill.type === "IMAGE" && fill.imageHash) {
-        imageHashes.push(fill.imageHash);
-      }
-    }
-  }
+  var imageHashes = collectImageHashesFromNode(node);
   if (imageHashes.length > 0) base._imageHashes = imageHashes;
 
-  if ("children" in node) {
-    var children = [];
-    for (var i = 0; i < node.children.length; i++) {
-      children.push(serializeNode(node.children[i]));
+  return base;
+}
+
+// 异步序列化节点（处理 mainComponent 等需要异步访问的属性）
+async function serializeNodeAsync(node) {
+  var base = serializeNodeBase(node);
+
+  // 异步获取 mainComponent
+  if (base.type === "INSTANCE") {
+    try {
+      var mainComponent = await node.getMainComponentAsync();
+      if (mainComponent) {
+        base.componentId = mainComponent.id;
+        base.componentName = mainComponent.name;
+      }
+    } catch (e) {
+      // 忽略错误，保持 base 不变
     }
-    base.children = children;
+  }
+
+  var children = readProp(node, "children", null);
+  if (children) {
+    base.children = [];
+    for (var i = 0; i < children.length; i++) {
+      base.children.push(await serializeNodeAsync(children[i]));
+    }
+  }
+
+  return base;
+}
+
+// 同步版本保留（用于不需要异步访问的场景）
+function serializeNode(node) {
+  var base = serializeNodeBase(node);
+
+  if (base.type === "INSTANCE") {
+    base.isInstance = true;
+    // mainComponent 需要异步访问，在 serializeNodeAsync 中处理
+  }
+
+  var children = readProp(node, "children", null);
+  if (children) {
+    base.children = [];
+    for (var i = 0; i < children.length; i++) {
+      base.children.push(serializeNode(children[i]));
+    }
   }
 
   return base;
@@ -172,80 +286,96 @@ function collectImageHashes(nodeJson) {
 
 // ── 消息处理 ──────────────────────────────────────────────────────────────
 
-figma.ui.onmessage = function(msg) {
+figma.ui.onmessage = async function(msg) {
   if (msg.type === "export") {
-    var selection = figma.currentPage.selection;
-    if (selection.length === 0) {
-      figma.ui.postMessage({ type: "error", message: "请先选中至少一个节点" });
-      return;
-    }
+    try {
+      var selection = figma.currentPage.selection;
+      if (selection.length === 0) {
+        figma.ui.postMessage({ type: "error", message: "请先选中至少一个节点" });
+        return;
+      }
 
-    figma.ui.postMessage({ type: "progress", message: "正在序列化节点..." });
+      figma.ui.postMessage({ type: "progress", message: "正在序列化节点..." });
 
-    var nodes = [];
-    for (var i = 0; i < selection.length; i++) {
-      nodes.push(serializeNode(selection[i]));
-    }
+      var nodes = [];
+      var nodeNames = [];
+      for (var i = 0; i < selection.length; i++) {
+        nodes.push(await serializeNodeAsync(selection[i]));
+        nodeNames.push(readProp(selection[i], "name", "node"));
+      }
 
-    var exportData = {
-      meta: {
-        exportedAt: new Date().toISOString(),
-        figmaFileName: figma.root.name,
-        pageId: figma.currentPage.id,
-        pageName: figma.currentPage.name,
-        nodeCount: selection.length
-      },
-      nodes: nodes,
-      images: {}
-    };
+      var exportData = {
+        meta: {
+          exportedAt: new Date().toISOString(),
+          nodeName: nodeNames.join("+"),
+          nodeCount: selection.length
+        },
+        nodes: nodes,
+        images: {}
+      };
 
-    // 收集所有图片哈希
-    var allHashes = {};
-    for (var i = 0; i < nodes.length; i++) {
-      var hs = collectImageHashes(nodes[i]);
-      for (var j = 0; j < hs.length; j++) allHashes[hs[j]] = true;
-    }
-    var hashList = Object.keys(allHashes);
+      // 收集所有图片哈希
+      var allHashes = {};
+      for (var i = 0; i < nodes.length; i++) {
+        var hs = collectImageHashes(nodes[i]);
+        for (var j = 0; j < hs.length; j++) allHashes[hs[j]] = true;
+      }
+      var hashList = Object.keys(allHashes);
 
-    if (hashList.length === 0) {
-      var cleanData0 = JSON.parse(JSON.stringify(exportData));
-      figma.ui.postMessage({ type: "done", data: cleanData0 });
-      return;
-    }
+      if (hashList.length === 0) {
+        var cleanData0 = JSON.parse(JSON.stringify(exportData));
+        figma.ui.postMessage({ type: "done", data: cleanData0 });
+        return;
+      }
 
-    figma.ui.postMessage({ type: "progress", message: "导出图片资源 (" + hashList.length + " 张)..." });
+      figma.ui.postMessage({ type: "progress", message: "导出图片资源 (" + hashList.length + " 张)..." });
 
-    // 逐个导出图片（async 递归）
-    var imageResults = {};
-    var index = 0;
+      // 并行导出所有图片，bytes 直接传给 UI 侧做 base64 转换
+      // （避免 ES5 var 闭包 bug 和插件沙箱 btoa 大文件限制）
+      var promises = [];
+      for (var i = 0; i < hashList.length; i++) {
+        (function(hash) {
+          var image = figma.getImageByHash(hash);
+          if (!image) return;
+          var p = image.getBytesAsync().then(function(bytes) {
+            return { hash: hash, bytes: Array.from(bytes) };
+          }).catch(function() {
+            return null;
+          });
+          promises.push(p);
+        })(hashList[i]);
+      }
 
-    function exportNext() {
-      if (index >= hashList.length) {
-        exportData.images = imageResults;
+      Promise.all(promises).then(function(results) {
+        var imageCount = 0;
         var cleanData = JSON.parse(JSON.stringify(exportData));
-        figma.ui.postMessage({ type: "done", data: cleanData });
-        return;
-      }
-      var hash = hashList[index];
-      index++;
-      var image = figma.getImageByHash(hash);
-      if (!image) {
-        exportNext();
-        return;
-      }
-      image.getBytesAsync().then(function(bytes) {
-        var binary = "";
-        for (var k = 0; k < bytes.length; k++) {
-          binary += String.fromCharCode(bytes[k]);
-        }
-        imageResults[hash] = "data:image/png;base64," + btoa(binary);
-        exportNext();
-      }).catch(function() {
-        exportNext();
-      });
-    }
+        var pending = results.length;
 
-    exportNext();
+        if (pending === 0) {
+          figma.ui.postMessage({ type: "done", data: cleanData, imageCount: 0 });
+          return;
+        }
+
+        for (var i = 0; i < results.length; i++) {
+          (function(result) {
+            if (!result) {
+              pending--;
+              if (pending === 0) figma.ui.postMessage({ type: "done", data: cleanData, imageCount: imageCount });
+              return;
+            }
+
+            imageCount++;
+            figma.ui.postMessage({ type: "image", hash: result.hash, bytes: result.bytes });
+            pending--;
+            if (pending === 0) figma.ui.postMessage({ type: "done", data: cleanData, imageCount: imageCount });
+          })(results[i]);
+        }
+      }).catch(function(e) {
+        figma.ui.postMessage({ type: "error", message: "导出图片失败：" + (e && e.message ? e.message : e) });
+      });
+    } catch (e) {
+      figma.ui.postMessage({ type: "error", message: "导出失败：" + (e && e.message ? e.message : e) });
+    }
   }
 
   if (msg.type === "cancel") {
