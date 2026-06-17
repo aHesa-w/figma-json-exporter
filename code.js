@@ -286,16 +286,23 @@ function collectImageHashes(nodeJson) {
 
 // ── 消息处理 ──────────────────────────────────────────────────────────────
 
+function wrapMsg(base, requestId) {
+  if (requestId) base.requestId = requestId;
+  return base;
+}
+
 figma.ui.onmessage = async function(msg) {
+  var rid = msg.requestId;
+
   if (msg.type === "export") {
     try {
       var selection = figma.currentPage.selection;
       if (selection.length === 0) {
-        figma.ui.postMessage({ type: "error", message: "请先选中至少一个节点" });
+        figma.ui.postMessage(wrapMsg({ type: "error", message: "请先选中至少一个节点" }, rid));
         return;
       }
 
-      figma.ui.postMessage({ type: "progress", message: "正在序列化节点..." });
+      figma.ui.postMessage(wrapMsg({ type: "progress", message: "正在序列化节点..." }, rid));
 
       var nodes = [];
       var nodeNames = [];
@@ -324,11 +331,11 @@ figma.ui.onmessage = async function(msg) {
 
       if (hashList.length === 0) {
         var cleanData0 = JSON.parse(JSON.stringify(exportData));
-        figma.ui.postMessage({ type: "done", data: cleanData0 });
+        figma.ui.postMessage(wrapMsg({ type: "done", data: cleanData0 }, rid));
         return;
       }
 
-      figma.ui.postMessage({ type: "progress", message: "导出图片资源 (" + hashList.length + " 张)..." });
+      figma.ui.postMessage(wrapMsg({ type: "progress", message: "导出图片资源 (" + hashList.length + " 张)..." }, rid));
 
       // 并行导出所有图片，bytes 直接传给 UI 侧做 base64 转换
       // （避免 ES5 var 闭包 bug 和插件沙箱 btoa 大文件限制）
@@ -352,7 +359,7 @@ figma.ui.onmessage = async function(msg) {
         var pending = results.length;
 
         if (pending === 0) {
-          figma.ui.postMessage({ type: "done", data: cleanData, imageCount: 0 });
+          figma.ui.postMessage(wrapMsg({ type: "done", data: cleanData, imageCount: 0 }, rid));
           return;
         }
 
@@ -360,21 +367,21 @@ figma.ui.onmessage = async function(msg) {
           (function(result) {
             if (!result) {
               pending--;
-              if (pending === 0) figma.ui.postMessage({ type: "done", data: cleanData, imageCount: imageCount });
+              if (pending === 0) figma.ui.postMessage(wrapMsg({ type: "done", data: cleanData, imageCount: imageCount }, rid));
               return;
             }
 
             imageCount++;
-            figma.ui.postMessage({ type: "image", hash: result.hash, bytes: result.bytes });
+            figma.ui.postMessage(wrapMsg({ type: "image", hash: result.hash, bytes: result.bytes }, rid));
             pending--;
-            if (pending === 0) figma.ui.postMessage({ type: "done", data: cleanData, imageCount: imageCount });
+            if (pending === 0) figma.ui.postMessage(wrapMsg({ type: "done", data: cleanData, imageCount: imageCount }, rid));
           })(results[i]);
         }
       }).catch(function(e) {
-        figma.ui.postMessage({ type: "error", message: "导出图片失败：" + (e && e.message ? e.message : e) });
+        figma.ui.postMessage(wrapMsg({ type: "error", message: "导出图片失败：" + (e && e.message ? e.message : e) }, rid));
       });
     } catch (e) {
-      figma.ui.postMessage({ type: "error", message: "导出失败：" + (e && e.message ? e.message : e) });
+      figma.ui.postMessage(wrapMsg({ type: "error", message: "导出失败：" + (e && e.message ? e.message : e) }, rid));
     }
   }
 

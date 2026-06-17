@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "figma-json-exporter": {
+      "description": "Figma JSON Exporter - 导出 Figma 选中节点的结构数据",
+      "command": "curl",
+      "args": [
+        "-s",
+        "-X", "POST",
+        "-H", "Content-Type: application/json",
+        "-d", "{\"jsonrpc\":\"2.0\",\"method\":\"tools/call\",\"params\":{\"name\":\"figma_export\",\"arguments\":{}},\"id\":1}",
+        "http://localhost:3456/mcp"
+      ],
+      "url": "http://localhost:3456/mcp"
+    }
+  }
+}

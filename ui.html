@@ -45,6 +45,25 @@
     .status.error   { background: #fde8e8; color: #c0392b; display: block; }
     .status.success { background: #e8fdf0; color: #1a7a3f; display: block; }
     .divider { border: none; border-top: 1px solid #eee; }
+
+    /* Agent 连接状态指示器 */
+    .agent-bar {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      color: #999;
+      padding: 4px 0;
+    }
+    .agent-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #ccc;
+      flex-shrink: 0;
+    }
+    .agent-dot.connected { background: #2ecc71; }
+    .agent-dot.disconnected { background: #e74c3c; }
   </style>
   <!-- JSZip：打包 zip 用 -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
@@ -52,6 +71,12 @@
 <body>
   <h2>JSON Exporter</h2>
   <p class="desc">导出选中节点的完整结构数据，包含样式、约束、Auto Layout 和图片资源。</p>
+
+  <!-- Agent 连接状态 -->
+  <div class="agent-bar" id="agentBar">
+    <span class="agent-dot disconnected" id="agentDot"></span>
+    <span id="agentLabel">Agent 未连接</span>
+  </div>
 
   <hr class="divider" />
 
@@ -75,6 +100,82 @@
 
   <script>
     var imageBytesMap = {};
+    var AGENT_WS_URL = "ws://localhost:3456/ws";
+    var ws = null;
+    var wsReconnectTimer = null;
+    var remoteRequestId = null;  // 非 null 时表示由 Agent 远程触发
+
+    // ── Agent WebSocket 连接 ──────────────────────────────────────────────
+
+    function setAgentStatus(connected) {
+      var dot = document.getElementById("agentDot");
+      var label = document.getElementById("agentLabel");
+      dot.className = "agent-dot " + (connected ? "connected" : "disconnected");
+      label.textContent = connected ? "Agent 已连接" : "Agent 未连接";
+    }
+
+    function connectAgent() {
+      if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+
+      try {
+        ws = new WebSocket(AGENT_WS_URL);
+      } catch (e) {
+        setAgentStatus(false);
+        scheduleReconnect();
+        return;
+      }
+
+      ws.onopen = function() {
+        setAgentStatus(true);
+      };
+
+      ws.onmessage = function(event) {
+        var msg;
+        try {
+          msg = JSON.parse(event.data);
+        } catch (e) {
+          return;
+        }
+
+        if (msg.type === "ping") {
+          ws.send(JSON.stringify({ type: "pong" }));
+          return;
+        }
+
+        if (msg.type === "export") {
+          // Agent 远程触发导出
+          remoteRequestId = msg.requestId || null;
+          startExportInternal();
+          return;
+        }
+      };
+
+      ws.onclose = function() {
+        setAgentStatus(false);
+        if (remoteRequestId) {
+          // 连接断开，通知 Agent（但 Agent 端已经知道断开）
+          remoteRequestId = null;
+        }
+        scheduleReconnect();
+      };
+
+      ws.onerror = function() {
+        // onclose 会触发重连
+      };
+    }
+
+    function scheduleReconnect() {
+      if (wsReconnectTimer) clearTimeout(wsReconnectTimer);
+      wsReconnectTimer = setTimeout(connectAgent, 3000);
+    }
+
+    function sendToAgent(msg) {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(msg));
+      }
+    }
+
+    // ── UI 导出逻辑 ──────────────────────────────────────────────────────
 
     function setStatus(msg, type) {
       var el = document.getElementById("status");
@@ -83,10 +184,21 @@
     }
 
     function startExport() {
+      // 手动按钮触发，不是远程
+      remoteRequestId = null;
+      startExportInternal();
+    }
+
+    function startExportInternal() {
       imageBytesMap = {};
       document.getElementById("exportBtn").disabled = true;
       setStatus("正在导出，请稍候...", "info");
-      parent.postMessage({ pluginMessage: { type: "export" } }, "*");
+      parent.postMessage({
+        pluginMessage: {
+          type: "export",
+          requestId: remoteRequestId
+        }
+      }, "*");
     }
 
     function cancel() {
@@ -157,16 +269,24 @@
 
       if (msg.type === "progress") {
         setStatus(msg.message, "info");
+        if (remoteRequestId) sendToAgent({ type: "progress", requestId: remoteRequestId, message: msg.message });
       }
 
       if (msg.type === "image") {
         imageBytesMap[msg.hash] = msg.bytes;
         setStatus("已接收图片资源 " + Object.keys(imageBytesMap).length + " 张...", "info");
+        if (remoteRequestId) {
+          sendToAgent({ type: "image", requestId: remoteRequestId, hash: msg.hash, bytes: msg.bytes });
+        }
       }
 
       if (msg.type === "error") {
         setStatus(msg.message, "error");
         document.getElementById("exportBtn").disabled = false;
+        if (remoteRequestId) {
+          sendToAgent({ type: "error", requestId: remoteRequestId, message: msg.message });
+          remoteRequestId = null;
+        }
       }
 
       if (msg.type === "done") {
@@ -175,6 +295,25 @@
         var includeImages = document.getElementById("includeImages").checked;
         var nodeCount = (data.meta && data.meta.nodeCount) || 0;
 
+        if (remoteRequestId) {
+          // 远程模式：通过 WebSocket 将数据发给 Agent
+          // 清理内部字段
+          data.nodes.forEach(cleanHashes);
+          delete data._imageHashes;
+
+          sendToAgent({
+            type: "done",
+            requestId: remoteRequestId,
+            data: data,
+            imageCount: imageCount
+          });
+          setStatus("已发送至 Agent（" + nodeCount + " 个节点" + (imageCount > 0 ? "，" + imageCount + " 张图片" : ""） + "）", "success");
+          document.getElementById("exportBtn").disabled = false;
+          remoteRequestId = null;
+          return;
+        }
+
+        // 手动模式：直接下载
         if (includeImages && imageCount > 0) {
           setStatus("正在打包 " + imageCount + " 张图片...", "info");
           downloadZip(data, imageBytesMap).then(function() {
@@ -191,6 +330,9 @@
         }
       }
     };
+
+    // 启动 Agent 自动连接
+    connectAgent();
   </script>
 </body>
 </html>
