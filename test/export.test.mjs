@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { node, pluginFixture } from "./plugin-fixture.mjs";
+import { node, clippedNode, png, pluginFixture } from "./plugin-fixture.mjs";
 
 test("manual and MCP exports prune invisible roots/subtrees and their images", async () => {
   for (const requestId of [undefined, "mcp-export-1"]) {
@@ -247,16 +247,94 @@ test("outside/center strokes, shadows, blur and glyph overhang use an expanded i
   }
 });
 
-test("expanded export failures remove temporary nodes and missing visual bounds fail explicitly", async () => {
+test("expanded export failures and unrecoverable visual bounds clean up temporary nodes", async () => {
   const source = node("bad", { type: "VECTOR", absoluteRenderBounds: { x: -4, y: -4, width: 108, height: 108 } });
   const fixture = pluginFixture([source], { frameExport() { throw new Error("export failed"); } });
   const result = await fixture.request();
   assert.equal(result.type, "error");
   assert.equal(fixture.frames[0].removed, true);
   assert.equal(fixture.frames[0].children[0].removed, true);
-  const missing = await pluginFixture([node("missing", { type: "VECTOR", absoluteRenderBounds: null })]).request();
+  const recovery = pluginFixture([node("missing", { type: "VECTOR", absoluteRenderBounds: null })]);
+  const missing = await recovery.request();
   assert.equal(missing.type, "error");
-  assert.match(missing.message, /absoluteRenderBounds/);
+  assert.match(missing.message, /Cannot recover absoluteRenderBounds.*missing.*unclipped clone/);
+  assert.equal(recovery.frames[0].removed, true);
+  assert.equal(recovery.frames[0].children[0].removed, true);
+});
+
+test("clipped instance children recover paint bounds without losing layout, alpha or theme modes", async () => {
+  for (const requestId of [undefined, "mcp-recover-bounds"]) {
+    const source = clippedNode("I35:1424;2452:9685", { type: "TEXT", fontName: { family: "Custom", style: "Italic" }, x: 150.25, y: 250.5, width: 100, height: 50, opacity: 0.6, resolvedVariableModes: { colors: "dark" } }, (clone) => {
+      assert.equal(clone.parent.clipsContent, false);
+      assert.equal(clone.parent.modes.colors, "dark");
+      assert.equal(clone.opacity, 0.6);
+      assert.equal(clone.relativeTransform[0][2] + clone.parent.x, 150.25);
+      assert.equal(clone.relativeTransform[1][2] + clone.parent.y, 250.5);
+      return { x: 146.25, y: 244.5, width: 112, height: 66 };
+    });
+    const root = node("clipping-root", { x: 10, y: 20, clipsContent: true, children: [source] });
+    source.parent = root;
+    const fixture = pluginFixture([root]);
+    const result = await fixture.request(requestId);
+    assert.equal(result.type, "done", result.message);
+    const exported = result.data.nodes[0].children[0], asset = result.data.assets[exported.assetId];
+    assert.equal(exported.renderBounds, null); // Retain the original API result.
+    assert.equal(exported.imageBoundsSource, "isolated-clone");
+    assert.equal(asset.boundsSource, "isolated-clone");
+    assert.equal(exported.absoluteBounds.x, 150.25);
+    assert.equal(exported.relativeBounds.x, 140.25);
+    assert.equal(exported.imagePlacement.x, -4);
+    assert.equal(exported.imagePlacement.y, -6);
+    assert.equal(exported.relativeImageBounds.x, 136.25);
+    assert.equal(exported.relativeImageBounds.y, 224.5);
+    assert.equal(asset.pixelWidth, 224);
+    assert.equal(asset.pixelHeight, 132);
+    assert.equal(result.data.nodes[0].clipsContent, true);
+    const frame = fixture.frames[0];
+    assert.equal(frame.x + frame.children[0].relativeTransform[0][2], 150.25);
+    assert.equal(frame.y + frame.children[0].relativeTransform[1][2], 250.5);
+    assert.equal(frame.clipsContent, true);
+    assert.equal(frame.removed, true);
+    assert.equal(frame.children[0].removed, true);
+    assert.equal(source.parent, root);
+    assert.equal(source.absoluteRenderBounds, null);
+  }
+});
+
+test("recovered bounds equal to layout still export the unclipped clone", async () => {
+  const fixture = pluginFixture([clippedNode("clipped-vector", { type: "VECTOR" }, { x: 0, y: 0, width: 100, height: 100 })]);
+  const result = await fixture.request();
+  assert.equal(result.type, "done", result.message);
+  assert.equal(result.data.nodes[0].imagePlacement.x, 0);
+  assert.equal(fixture.frames.length, 1);
+  assert.equal(fixture.frames[0].removed, true);
+});
+
+test("recovery preserves rotated zero-height shapes and rejects clipped PNG dimensions", async () => {
+  const source = clippedNode("rotated-line", { type: "VECTOR", width: 100, height: 0, absoluteTransform: [[0, -1, 20], [1, 0, 30]] }, { x: 18, y: 28, width: 4, height: 104 });
+  const fixture = pluginFixture([source]);
+  const result = await fixture.request();
+  assert.equal(result.type, "done", result.message);
+  assert.equal(result.data.nodes[0].absoluteBounds.width, 0);
+  assert.equal(result.data.nodes[0].imageBounds.width, 4);
+  assert.deepEqual(Array.from(fixture.frames[0].children[0].relativeTransform[0]), [0, -1, 2]);
+  assert.deepEqual(Array.from(fixture.frames[0].children[0].relativeTransform[1]), [1, 0, 2]);
+  const bad = pluginFixture([source], { frameExport: () => new Uint8Array(png(1, 1)) });
+  const failed = await bad.request();
+  assert.equal(failed.type, "error");
+  assert.match(failed.message, /Raster pixel size/);
+  assert.equal(bad.frames[0].removed, true);
+  assert.equal(bad.frames[0].children[0].removed, true);
+});
+
+test("invalid or throwing recovered bounds never drop a layer or publish a successful export", async () => {
+  for (const visual of [null, { x: NaN, y: 0, width: 100, height: 100 }, { x: 0, y: 0, width: -1, height: 100 }, () => { throw new Error("API unavailable"); }]) {
+    const fixture = pluginFixture([clippedNode("unrecoverable", { type: "VECTOR" }, visual)]);
+    assert.equal((await fixture.request()).type, "error");
+    assert.equal(fixture.messages.some(m => m.type === "done"), false);
+    assert.equal(fixture.frames[0].removed, true);
+    assert.equal(fixture.frames[0].children[0].removed, true);
+  }
 });
 
 test("expanded raster keeps inherited variable modes and rejects unresolvable color context", async () => {

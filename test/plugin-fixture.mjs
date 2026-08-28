@@ -33,6 +33,22 @@ export function node(id, properties = {}) {
     async exportAsync() { const b = this.absoluteBoundingBox ?? this.absoluteRenderBounds; return new Uint8Array(png(Math.ceil(b.width * 2), Math.ceil(b.height * 2))); }, ...properties };
 }
 
+// Model a node culled by its original ancestor, readable only after reparenting
+// its clone under an unclipped frame. This is not a live Figma measurement.
+export function clippedNode(id, properties, isolatedBounds) {
+  return node(id, { ...properties, absoluteRenderBounds: null,
+    clone() {
+      const clone = node(`${id}-clone`, { ...properties, removed: false, remove() { this.removed = true; } });
+      Object.defineProperty(clone, "absoluteRenderBounds", { get() {
+        if (!this.parent || this.parent.clipsContent) return null;
+        return typeof isolatedBounds === "function" ? isolatedBounds(this) : isolatedBounds;
+      } });
+      return clone;
+    },
+    async exportAsync() { throw new Error("Must export the isolated clone, not the clipped original"); },
+  });
+}
+
 export function pluginFixture(selection, options = {}) {
   const imageReads = [];
   const messages = [];
@@ -44,7 +60,7 @@ export function pluginFixture(selection, options = {}) {
     mixed: Symbol("mixed"), showUI() {}, closePlugin() {},
     currentPage: { selection },
     createFrame() {
-      const frame = { removed: false, children: [], modes: {}, setExplicitVariableModeForCollection(collection, mode) { this.modes[collection.id] = mode; }, resizeWithoutConstraints(w, h) { this.width = w; this.height = h; }, appendChild(child) { this.children.push(child); }, remove() { this.removed = true; }, async exportAsync(settings) { this.settings = settings; return options.frameExport ? options.frameExport(this) : new Uint8Array(png(Math.ceil(this.width * 2), Math.ceil(this.height * 2))); } };
+      const frame = { removed: false, children: [], modes: {}, setExplicitVariableModeForCollection(collection, mode) { this.modes[collection.id] = mode; }, resizeWithoutConstraints(w, h) { this.width = w; this.height = h; }, appendChild(child) { this.children.push(child); child.parent = this; }, remove() { this.removed = true; }, async exportAsync(settings) { this.settings = settings; return options.frameExport ? options.frameExport(this) : new Uint8Array(png(Math.ceil(this.width * 2), Math.ceil(this.height * 2))); } };
       frames.push(frame); return frame;
     },
     ui: { postMessage(msg) {

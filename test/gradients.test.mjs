@@ -66,7 +66,7 @@ test("wrong direction, reversed stops, alpha, offsets and missing gradients fail
     [target.css.replace("linear-gradient", "repeating-linear-gradient"), "gradient-missing-or-unsupported"],
   ]) assert.equal(validateGradient(n, { ...style, backgroundImage: css })[0].property, property);
   assert.equal(validateGradient(n, { ...style, backgroundSize: "50% 100%" })[0].property, "gradient-paint-box");
-  const design = { meta: { schemaVersion: 3, exporterVersion: "3.4.0" }, assets: {}, nodes: [n] };
+  const design = { meta: { schemaVersion: 3, exporterVersion: "3.4.1" }, assets: {}, nodes: [n] };
   const actual = { collectorVersion: 4, coordinateSpace: "root-relative", stable: true, fontsReady: true, nodes: [{ id: "root", rootId: "root", parentId: null, visible: true, bounds: n.absoluteBounds, renderStyle: { ...style, backgroundImage: target.css.replace("90deg", "180deg") } }] };
   assert.equal(validateLayout(design, actual, 10).passed, false); // Geometry tolerance cannot relax angular checks.
 });

@@ -18,7 +18,7 @@ export function imageFormat(bytes: Buffer): { extension: string; mimeType: strin
 export async function persistExport(input: unknown, assets: Map<string, Buffer>, options: ExportOptions, signal?: AbortSignal) {
   signal?.throwIfAborted();
   const design = prepareDesign(input);
-  if (design.meta.exporterVersion !== "3.4.0") throw new Error("Figma plugin v3.4.0 is required for complete rendering-property exports. Close and reopen JSON Exporter, then export again");
+  if (design.meta.exporterVersion !== "3.4.1") throw new Error("Figma plugin v3.4.1 is required for complete rendering-property exports. Close and reopen JSON Exporter, then export again");
   const output = options.outputDir ?? process.env.FIGMA_EXPORT_DIR ?? join(homedir(), "Downloads", "figma-json-exporter");
   if (!isAbsolute(output)) throw new Error("outputDir must be an absolute local directory");
   const layers = flattenLayers(design);
@@ -69,7 +69,7 @@ export async function persistExport(input: unknown, assets: Map<string, Buffer>,
     design.meta.collectorPath = join(directory, "collect-layout.js");
     design.meta.collectorExpressionPath = join(directory, "collector-expression.js");
     design.meta.validation = { attribute: "data-d2c-id", rootAttribute: "data-d2c-root", coordinateSpace: "root-relative", tolerance: 1, required: true, collectorVersion: COLLECTOR_VERSION, propertyChecksRequired: true, visualReviewRequired: true };
-    await writeFile(join(staging, "layout.json"), JSON.stringify(layers.map(({ id, name, type, parentId, rootId, depth, absoluteBounds, relativeBounds, localBounds, renderAs, assetId, imageBounds, imagePlacement, relativeImageBounds, gradient, implementation }) => ({ id, name, type, parentId, rootId, depth, absoluteBounds, relativeBounds, localBounds, renderAs, assetId, imageBounds, imagePlacement, relativeImageBounds, gradient, implementation })), null, 2));
+    await writeFile(join(staging, "layout.json"), JSON.stringify(layers.map(({ id, name, type, parentId, rootId, depth, absoluteBounds, relativeBounds, localBounds, renderAs, assetId, imageBounds, imagePlacement, relativeImageBounds, imageBoundsSource, gradient, implementation }) => ({ id, name, type, parentId, rootId, depth, absoluteBounds, relativeBounds, localBounds, renderAs, assetId, imageBounds, imagePlacement, relativeImageBounds, imageBoundsSource, gradient, implementation })), null, 2));
     await writeFile(join(staging, "implementation.json"), JSON.stringify({ instructions: "Read design.json for source values. Follow each layer's rules and checks; never silently drop properties. Review items are NOT automatically verified. passed=true only covers automated checks, not full visual acceptance.", layers: layers.map(({ id, name, implementation }) => ({ id, name, ...implementation })) }, null, 2));
     await writeFile(join(staging, "collect-layout.js"), `window.collectFigmaLayout = ${collectLayout.toString()};\n`);
     await writeFile(join(staging, "collector-expression.js"), `(${collectLayout.toString()})()`);

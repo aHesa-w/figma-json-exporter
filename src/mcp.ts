@@ -25,7 +25,7 @@ export function createMCPServer(exporter: Exporter): McpServer {
     connected: await exporter.connected(extra.signal), pluginName: "Figma JSON Exporter",
   })));
   server.registerTool("figma_export", {
-    description: "Export visible Figma selection with exact absolute and root-relative layer edges. Writes images, composite shape PNGs, design.json, layout.json, implementation.json and DOM collector to a unique local directory BEFORE returning paths. Use local assets rather than recreating icons. Read the per-layer implementation rules and pending reviews; reload the plugin after upgrading to v3.4.",
+    description: "Export visible Figma selection with exact absolute and root-relative layer edges. Writes images, composite shape PNGs, design.json, layout.json, implementation.json and DOM collector to a unique local directory BEFORE returning paths. Use local assets rather than recreating icons. Read the per-layer implementation rules and pending reviews; reload the plugin after upgrading to v3.4.1.",
     inputSchema: {
       outputDir: z.string().refine(isAbsolute, "Use an absolute directory").optional().describe("Parent directory for a new export bundle; defaults to ~/Downloads/figma-json-exporter. Existing files are not overwritten."),
       shapeGroupsAsImages: z.boolean().optional().describe("Default true: collapse pure shape groups, boolean operations and vectors into PNG image layers."),

@@ -261,7 +261,9 @@ function gradientRasterReason(base) {
 function rasterBoundsOf(base) {
   var layout = base.absoluteBounds, visual = base.renderBounds;
   if (!visual || ![visual.x, visual.y, visual.width, visual.height].every(function(v) { return typeof v === "number" && isFinite(v); }) || visual.width < 0 || visual.height < 0) {
-    throw new Error("Missing reliable absoluteRenderBounds for raster layer " + base.id);
+    // Figma can return null for a visible node outside an ancestor's clip.
+    // Defer measurement to an isolated clone; layout bounds are not paint bounds.
+    return null;
   }
   var left = Math.min(layout.left, visual.x), top = Math.min(layout.top, visual.y);
   var right = Math.max(layout.right, visual.x + visual.width), bottom = Math.max(layout.bottom, visual.y + visual.height);
@@ -270,8 +272,9 @@ function rasterBoundsOf(base) {
 
 async function exportRaster(item) {
   var options = { format: "PNG", constraint: { type: "SCALE", value: 2 }, contentsOnly: true, useAbsoluteBounds: true, colorProfile: "SRGB" };
-  var b = item.bounds, layout = item.layoutBounds;
-  if (b.x === layout.x && b.y === layout.y && b.width === layout.width && b.height === layout.height) return item.node.exportAsync(options);
+  var layout = item.layoutBounds, recoverBounds = !item.bounds;
+  var b = item.bounds || layout;
+  if (!recoverBounds && b.x === layout.x && b.y === layout.y && b.width === layout.width && b.height === layout.height) return item.node.exportAsync(options);
   // Export a clone in an isolated transparent canvas, not a page slice that
   // could include neighbouring artwork. Original layer geometry is untouched.
   var frame = null, clone = null;
@@ -281,8 +284,9 @@ async function exportRaster(item) {
     frame = figma.createFrame();
     frame.name = "__JSON_EXPORT_TEMP__";
     frame.fills = []; frame.strokes = []; frame.effects = [];
-    frame.layoutMode = "NONE"; frame.clipsContent = true;
-    frame.resizeWithoutConstraints(b.width, b.height);
+    // The probe must not inherit clipping or introduce a new clip itself.
+    frame.layoutMode = "NONE"; frame.clipsContent = false;
+    frame.resizeWithoutConstraints(Math.max(1, b.width), Math.max(1, b.height));
     frame.x = b.x; frame.y = b.y;
     // Moving a clone out of an ancestor must not change inherited variable
     // modes (e.g. a dark-theme color reverting to the collection default).
@@ -296,6 +300,21 @@ async function exportRaster(item) {
     frame.appendChild(clone);
     clone.relativeTransform = [[t[0][0], t[0][1], t[0][2] - b.x], [t[1][0], t[1][1], t[1][2] - b.y]];
     if (Math.abs(clone.width - item.width) > 0.001 || Math.abs(clone.height - item.height) > 0.001) throw new Error("Clone resized during raster export: " + item.id);
+    if (recoverBounds) {
+      var recovered = rasterBoundsOf({ absoluteBounds: layout, renderBounds: readProp(clone, "absoluteRenderBounds", null) });
+      if (!recovered || recovered.width <= 0 || recovered.height <= 0) {
+        throw new Error("Cannot recover absoluteRenderBounds for raster layer " + item.node.id + " (" + item.node.type + ") even in an unclipped clone; refusing to crop strokes/shadows or silently drop this layer");
+      }
+      b = item.bounds = recovered;
+      item.boundsSource = "isolated-clone";
+    }
+    // Resize without constraints, then reset the clone's world position so a
+    // negative paint offset does not move the exported artwork or its children.
+    frame.resizeWithoutConstraints(b.width, b.height);
+    frame.x = b.x; frame.y = b.y;
+    clone.relativeTransform = [[t[0][0], t[0][1], t[0][2] - b.x], [t[1][0], t[1][1], t[1][2] - b.y]];
+    if (Math.abs(clone.width - item.width) > 0.001 || Math.abs(clone.height - item.height) > 0.001) throw new Error("Clone resized during raster export: " + item.id);
+    frame.clipsContent = true;
     return await frame.exportAsync(options);
   } finally {
     try { if (clone && !clone.removed) clone.remove(); }
@@ -474,7 +493,7 @@ async function serializeNodeAsync(node, context) {
     base.imageBounds = rasterBoundsOf(base);
     // Retain original image bytes as well as the faithful cropped/filtered PNG.
     if (!imageLeaf) delete base._imageHashes;
-    context.rasters.push({ id: base.assetId, node: node, width: base.width, height: base.height, bounds: base.imageBounds, layoutBounds: base.absoluteBounds, transform: base.absoluteTransform, variableModes: readProp(node, "resolvedVariableModes", {}), kind: base.type === "TEXT" ? "text" : imageLeaf ? "image-render" : "shape", reason: base.rasterReason });
+    context.rasters.push({ id: base.assetId, node: node, layer: base, width: base.width, height: base.height, bounds: base.imageBounds, boundsSource: "absoluteRenderBounds", layoutBounds: base.absoluteBounds, transform: base.absoluteTransform, variableModes: readProp(node, "resolvedVariableModes", {}), kind: base.type === "TEXT" ? "text" : imageLeaf ? "image-render" : "shape", reason: base.rasterReason });
     return base;
   }
 
@@ -575,10 +594,10 @@ figma.ui.onmessage = async function(msg) {
       }
       if (nested) continue;
       var n = await serializeNodeAsync(selection[i], context);
-      if (n) { nodes.push(n); names.push(n.name); addRelativeBounds(n, n, null); }
+      if (n) { nodes.push(n); names.push(n.name); }
     }
     if (!nodes.length) throw new Error("选中的节点均已隐藏或透明度为 0，没有可导出的可见节点");
-    var data = { meta: { schemaVersion: 3, exporterVersion: "3.4.0", exportedAt: new Date().toISOString(), nodeName: names.join("+"), nodeCount: nodes.length }, nodes: nodes, images: {}, assets: {} };
+    var data = { meta: { schemaVersion: 3, exporterVersion: "3.4.1", exportedAt: new Date().toISOString(), nodeName: names.join("+"), nodeCount: nodes.length }, nodes: nodes, images: {}, assets: {} };
     data.meta.documentColorProfile = readProp(readProp(figma, "root", {}), "documentColorProfile", "LEGACY");
     var hashes = {};
     for (var i = 0; i < nodes.length; i++) {
@@ -599,12 +618,16 @@ figma.ui.onmessage = async function(msg) {
       var item = context.rasters[i];
       var bytes = await exportRaster(item);
       var pixels = rasterPixelSize(bytes, item.bounds);
-      data.assets[item.id] = { id: item.id, kind: item.kind, rasterReason: item.reason, nodeId: item.node.id, scale: 2, bounds: item.bounds, layoutBounds: item.layoutBounds, pixelWidth: pixels.width, pixelHeight: pixels.height, colorProfile: "SRGB", opacityBaked: true };
+      item.layer.imageBounds = item.bounds;
+      item.layer.imageBoundsSource = item.boundsSource;
+      data.assets[item.id] = { id: item.id, kind: item.kind, rasterReason: item.reason, nodeId: item.node.id, scale: 2, bounds: item.bounds, boundsSource: item.boundsSource, layoutBounds: item.layoutBounds, pixelWidth: pixels.width, pixelHeight: pixels.height, colorProfile: "SRGB", opacityBaked: true };
       figma.ui.postMessage(wrapMsg({ type: "image", hash: item.id, bytes: Array.from(bytes) }, rid));
       imageCount++;
     }
     // Strip internal image bookkeeping, retaining only public metadata and geometry.
     function clean(n) { delete n._imageHashes; if (n.children) n.children.forEach(clean); }
+    // Recovery can change the image canvas; derive offsets only after exports.
+    nodes.forEach(function(n) { addRelativeBounds(n, n, null); });
     nodes.forEach(clean);
     figma.ui.postMessage(wrapMsg({ type: "done", data: JSON.parse(JSON.stringify(data)), imageCount: imageCount }, rid));
   } catch (error) {

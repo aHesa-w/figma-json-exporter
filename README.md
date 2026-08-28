@@ -88,7 +88,7 @@ export-<uuid>/
 节点树还保留填充、描边、效果、圆角、文本、字体、Auto Layout、约束和组件引用。图片字节从 Figma 插件传至本机服务，所有文件写完后才发布目录并返回结果。缺图、读取失败、未知图片格式或写入失败都会使导出失败，不能返回假路径。支持 PNG/JPEG/GIF/WebP 原图；单张图片字节上限 32MB，单次累计 128MB，导出超时 120 秒。
 
 - `meta.schemaVersion = 3`；`meta.designPath`、`meta.layoutPath` 等为本机绝对路径。
-- `meta.exporterVersion = "3.4.0"` 标识新版插件已加载；升级后应关闭并重新打开 Figma 插件。服务会拒绝旧插件的导出，避免静默漏掉新增属性与字体/图片处理；旧版 v3 JSON 仍可用于校验诊断。
+- `meta.exporterVersion = "3.4.1"` 标识新版插件已加载；升级后应关闭并重新打开 Figma 插件。服务会拒绝旧插件的导出，避免静默漏掉新增属性与字体/图片处理；旧版 v3 JSON 仍可用于校验诊断。
 - `assets[assetId]` 含 `path`、`relativePath`、`mimeType`、`byteLength`、`sha256`。
 - 普通图片填充的 `imageHash` 对应 `assets[imageHash]`；形状图片节点通过 `assetId` 引用资源。
 - 手动导出可选择 ZIP，包含 `index.json` 和 `images/`，ZIP 中使用相对路径。UI 打包 ZIP 仍引用 cdnjs 上的 JSZip；MCP 不依赖该 CDN。
@@ -125,6 +125,12 @@ PNG 使用 Figma 的 `exportAsync`、`useAbsoluteBounds: true`。v3.3 将布局�
 
 所有 `renderAs: "image"` 节点都应优先于 `type === "TEXT"` 等分支处理，并使用对应本地文件。不能在图片上再绘制原文、填充、效果或重复应用节点透明度。
 
+## v3.4.1：空视觉边界恢复
+
+Figma 的 `absoluteRenderBounds` 允许为 `null`，不能仅凭此认定图层数据损坏。此前将其直接作为失败条件，会阻断某些被祖先裁剪的实例子层导出。新版对需要栅格化的节点先尝试无裁剪副本重测：保留原布局、绝对变换、透明度和继承变量模式，恢复画布后再计算图片偏移；保留原父级裁剪关系，不删除超框节点。[Figma 视觉边界定义](https://developers.figma.com/docs/plugins/api/node-properties/#absoluterenderbounds)
+
+此次增加模拟裁剪/实例子层和 MCP 落盘回归，未重新生成页面，也未验证具体设计文件的像素结果。升级后重开 Figma 插件并重启 MCP 服务以加载 3.4.1；采集协议仍为版本 4。
+
 ## v3.4：渐变方向与色标校验
 
 单层、普通混合模式的线性渐变保留为可编辑节点。MCP 在 `design.json` 和 `layout.json` 中提供 `layer.gradient`：包含 `angleDeg`、换算后的 `stops`、完整 `css` 和背景绘制区域设置。实现时使用 `gradient.css` 作为 `background-image`，并应用其 `backgroundOrigin/Clip/Size/Position/Repeat`，不要只读取矩阵里的角度或交换颜色顺序。
@@ -154,7 +160,7 @@ PNG 使用 Figma 的 `exportAsync`、`useAbsoluteBounds: true`。v3.3 将布局�
 
 图层本身的透明度/描边/阴影已经烘焙到图片，不重复施加。外层祖先的裁剪和透明度仍需保留。校验不再只看容器外框，同时检查资源归属、图片矩形、像素尺寸和图片透明度；扩大图片后再压缩进原框、遗漏负偏移、在本层容器裁掉阴影都会失败。手动 JSON/ZIP 和 MCP 都包含图片偏移元数据。
 
-需要扩展画布时，插件临时创建透明 FRAME，放入节点副本并保留原绝对变换与继承的变量模式，只导出其内容；成功或失败均在 finally 中清理副本/容器，不持久修改原节点。无法获取可靠视觉边界、变量模式无法保留、复制后尺寸变化或 PNG 像素尺寸不匹配时直接报错。PNG 尺寸允许最多 1 个物理像素的栅格化舍入，不把它当作任意缩放许可。服务落盘前再次检查尺寸。
+需要扩展画布时，插件临时创建透明 FRAME，放入节点副本并保留原绝对变换与继承的变量模式，只导出其内容；成功或失败均在 finally 中清理副本/容器，不持久修改原节点。原节点视觉边界为空或无效时，先在无裁剪的临时容器中重测副本，恢复后再确定图片画布；不直接使用布局框冒充视觉边界。`renderBounds` 保留原 API 值，`imageBoundsSource: "isolated-clone"` 标识恢复来源（资源中对应 `boundsSource`）。即使恢复后的边界恰好等于布局框，也导出这个副本，避免再次使用受祖先裁剪影响的原节点。副本仍无可靠视觉边界、变量模式无法保留、复制后尺寸变化或 PNG 像素尺寸不匹配时才明确报错。PNG 尺寸允许最多 1 个物理像素的栅格化舍入，不把它当作任意缩放许可。服务落盘前再次检查尺寸。
 
 这轮只优化代码与模拟 API/协议回归测试，未重新生成设计页面，也未进行真实 Figma 图像验收。临时复制导出的真实 Figma 行为、背板相关混合/背景模糊、嵌套蒙版和像素外观仍须实际复核；尺寸通过不代表像素一致。
 

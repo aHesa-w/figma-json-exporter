@@ -1,6 +1,6 @@
 {
   "name": "figma-json-exporter",
-  "version": "3.4.0",
+  "version": "3.4.1",
   "private": true,
   "description": "Local Figma export MCP server, compiled from TypeScript",
   "engines": {

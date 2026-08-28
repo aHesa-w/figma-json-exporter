@@ -163,7 +163,7 @@ export function validateLayout(designInput: unknown, actual: ActualLayout, toler
     scope: "automated geometry, image references/placement/pixel dimensions, clipping, opacity, ordinary corner radii, text metrics/colors and linear gradient direction/stops/paint box only; not full visual or interaction acceptance",
     collectorCompatible, requiredCollectorVersion: COLLECTOR_VERSION,
     visualAcceptance: "not-verified", reviewRequired,
-    sourceCoverage: design.meta.exporterVersion === "3.4.0" ? "v3.4" : "legacy export: newly added properties may be absent; re-export for full property coverage",
+    sourceCoverage: design.meta.exporterVersion === "3.4.1" ? "v3.4" : "legacy export: newly added properties may be absent; re-export for full property coverage",
     tolerance, total: layers.length, matched: layers.length - failed.length,
     missing, duplicates, unexpected, environmentReady,
     stable: actual.stable, fontsReady: actual.fontsReady, brokenImages: actual.brokenImages ?? [],
