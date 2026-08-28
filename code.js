@@ -7,21 +7,23 @@ figma.showUI(__html__, { width: 360, height: 280, title: "JSON Exporter" });
 function colorToRgba(color, opacity) {
   if (!color) return null;
   var op = opacity !== undefined ? opacity : 1;
-  var r = Math.round(color.r * 255);
-  var g = Math.round(color.g * 255);
-  var b = Math.round(color.b * 255);
+  var r = Number((color.r * 255).toFixed(6));
+  var g = Number((color.g * 255).toFixed(6));
+  var b = Number((color.b * 255).toFixed(6));
   var a = (color.a !== undefined ? color.a : 1) * op;
-  return "rgba(" + r + "," + g + "," + b + "," + a.toFixed(2) + ")";
+  return "rgba(" + r + "," + g + "," + b + "," + a + ")";
 }
 
 function serializePaint(paint) {
   var opacity = paint.opacity !== undefined ? paint.opacity : 1;
   var visible = paint.visible !== undefined ? paint.visible : true;
   var type = paint.type;
-  var base = { type: type, opacity: opacity, visible: visible };
+  var base = { type: type, opacity: opacity, visible: visible, blendMode: paint.blendMode };
 
   if (type === "SOLID") {
     base.color = colorToRgba(paint.color, opacity);
+    if (paint.color) base.rgba = { r: paint.color.r, g: paint.color.g, b: paint.color.b, a: (paint.color.a === undefined ? 1 : paint.color.a) * opacity };
+    base.opacityIncludedInColor = true;
     return base;
   }
   if (type.indexOf("GRADIENT") !== -1) {
@@ -62,6 +64,8 @@ function serializeEffect(effect) {
     };
   }
   if (effect.spread !== undefined) obj.spread = effect.spread;
+  if (effect.blendMode !== undefined) obj.blendMode = effect.blendMode;
+  if (effect.showShadowBehindNode !== undefined) obj.showShadowBehindNode = effect.showShadowBehindNode;
   return obj;
 }
 
@@ -131,6 +135,11 @@ function addRelativeBounds(node, root, parent) {
   node.relativeBounds = boundsFromRect({ x: rect.x - root.absoluteBounds.x, y: rect.y - root.absoluteBounds.y, width: rect.width, height: rect.height });
   var origin = parent ? parent.absoluteBounds : root.absoluteBounds;
   node.localBounds = boundsFromRect({ x: rect.x - origin.x, y: rect.y - origin.y, width: rect.width, height: rect.height });
+  if (node.imageBounds) {
+    var image = node.imageBounds;
+    node.imagePlacement = boundsFromRect({ x: image.x - rect.x, y: image.y - rect.y, width: image.width, height: image.height });
+    node.relativeImageBounds = boundsFromRect({ x: image.x - root.absoluteBounds.x, y: image.y - root.absoluteBounds.y, width: image.width, height: image.height });
+  }
   if (node.children) for (var i = 0; i < node.children.length; i++) addRelativeBounds(node.children[i], root, node);
 }
 
@@ -180,7 +189,8 @@ function serializeLineHeight(lineHeight, fontSize) {
   var value = readProp(lineHeight, "value", null);
   return {
     unit: unit, value: value,
-    css: unit === "AUTO" ? "normal" : unit === "PERCENT" ? value + "%" : unit === "PIXELS" ? value + "px" : null,
+    css: unit === "PERCENT" ? value + "%" : unit === "PIXELS" ? value + "px" : null,
+    source: unit === "AUTO" ? "unresolved" : "explicit",
     pixels: unit === "PIXELS" ? value : unit === "PERCENT" && typeof fontSize === "number" ? fontSize * value / 100 : null
   };
 }
@@ -191,6 +201,7 @@ var SYSTEM_FONT_FAMILIES = ["arial", "arial black", "helvetica", "helvetica neue
 function textRasterReason(node, base) {
   if (base.type !== "TEXT") return null;
   if (readProp(node, "hasMissingFont", false)) return "missing-font";
+  if (readProp(readProp(figma, "root", {}), "documentColorProfile", "LEGACY") === "DISPLAY_P3") return "wide-gamut-text";
   var fonts = [];
   if (base.fontName !== "mixed") fonts = [base.fontName];
   else {
@@ -201,15 +212,113 @@ function textRasterReason(node, base) {
     var family = String(fonts[i].family || "").trim().toLowerCase();
     if (SYSTEM_FONT_FAMILIES.indexOf(family) === -1) return "non-system-font";
   }
-  if (base.fontName === "mixed" || base.fontSize === "mixed" || base.lineHeight === "mixed") return "mixed-text-style";
+  var textProps = ["fontName", "fontSize", "fontWeight", "lineHeight", "letterSpacing", "textDecoration", "textCase", "paragraphSpacing", "paragraphIndent", "fills", "strokes"];
+  for (var p = 0; p < textProps.length; p++) {
+    if (base[textProps[p]] === "mixed" || isMixed(readProp(node, textProps[p], null))) return "mixed-text-style";
+  }
+  if (base.lineHeight.unit === "AUTO" && base.lineHeight.source !== "figma-css") return "unresolved-auto-line-height";
+  if (base.strokes && base.strokes.some(function(p) { return p.visible !== false && p.opacity !== 0; })) return "text-stroke";
+  if (!base.textColor) return "complex-text-paint";
   return null;
 }
 
-function serializeLetterSpacing(letterSpacing) {
+function serializeTextColor(fills) {
+  if (!fills) return null;
+  var visible = fills.filter(function(p) { return p.visible !== false && p.opacity !== 0; });
+  if (!visible.length) return { css: "rgba(0,0,0,0)", rgba: { r: 0, g: 0, b: 0, a: 0 }, opacityIncluded: true };
+  if (visible.length !== 1 || visible[0].type !== "SOLID" || !visible[0].rgba || (visible[0].blendMode && visible[0].blendMode !== "NORMAL")) return null;
+  return { css: visible[0].color, rgba: visible[0].rgba, opacityIncluded: true };
+}
+
+async function resolveAutoLineHeight(node, base) {
+  if (base.type !== "TEXT" || base.lineHeight.unit !== "AUTO") return;
+  try {
+    var css = await node.getCSSAsync();
+    var value = String(css["line-height"] || "").trim();
+    var match = /^(\d+(?:\.\d+)?|\.\d+)px$/.exec(value);
+    if (match && Number(match[1]) > 0) {
+      base.lineHeight.css = value;
+      base.lineHeight.pixels = Number(match[1]);
+      base.lineHeight.source = "figma-css";
+    }
+  } catch (e) { /* Unresolved AUTO is rasterized; never infer from text box height. */ }
+}
+
+function gradientRasterReason(base) {
+  var fills = (base.fills || []).filter(function(p) { return p.visible !== false && p.opacity !== 0; });
+  var strokes = (base.strokes || []).filter(function(p) { return p.visible !== false && p.opacity !== 0; });
+  function gradient(p) { return String(p.type).indexOf("GRADIENT") === 0; }
+  if (!fills.some(gradient) && !strokes.some(gradient)) return null;
+  // Only a single normal linear fill has the checked CSS representation.
+  // Preserve complex gradients as a composed asset, including layout containers.
+  if (strokes.some(gradient) || fills.length !== 1 || fills[0].type !== "GRADIENT_LINEAR" || (fills[0].blendMode && fills[0].blendMode !== "NORMAL") || !(base.width > 0 && base.height > 0)) return "complex-gradient";
+  if (readProp(readProp(figma, "root", {}), "documentColorProfile", "LEGACY") === "DISPLAY_P3") return "wide-gamut-gradient";
+  var m = fills[0].gradientTransform;
+  if (!Array.isArray(m) || m.length !== 2 || !m.every(function(row) { return Array.isArray(row) && row.length === 3 && row.every(function(n) { return typeof n === "number" && isFinite(n); }); }) || Math.abs(m[0][0] * m[1][1] - m[0][1] * m[1][0]) < 1e-12) return "invalid-gradient-transform";
+  return null;
+}
+
+function rasterBoundsOf(base) {
+  var layout = base.absoluteBounds, visual = base.renderBounds;
+  if (!visual || ![visual.x, visual.y, visual.width, visual.height].every(function(v) { return typeof v === "number" && isFinite(v); }) || visual.width < 0 || visual.height < 0) {
+    throw new Error("Missing reliable absoluteRenderBounds for raster layer " + base.id);
+  }
+  var left = Math.min(layout.left, visual.x), top = Math.min(layout.top, visual.y);
+  var right = Math.max(layout.right, visual.x + visual.width), bottom = Math.max(layout.bottom, visual.y + visual.height);
+  return boundsFromRect({ x: left, y: top, width: right - left, height: bottom - top });
+}
+
+async function exportRaster(item) {
+  var options = { format: "PNG", constraint: { type: "SCALE", value: 2 }, contentsOnly: true, useAbsoluteBounds: true, colorProfile: "SRGB" };
+  var b = item.bounds, layout = item.layoutBounds;
+  if (b.x === layout.x && b.y === layout.y && b.width === layout.width && b.height === layout.height) return item.node.exportAsync(options);
+  // Export a clone in an isolated transparent canvas, not a page slice that
+  // could include neighbouring artwork. Original layer geometry is untouched.
+  var frame = null, clone = null;
+  try {
+    var t = item.transform;
+    if (!t) throw new Error("Missing absoluteTransform for expanded raster " + item.id);
+    frame = figma.createFrame();
+    frame.name = "__JSON_EXPORT_TEMP__";
+    frame.fills = []; frame.strokes = []; frame.effects = [];
+    frame.layoutMode = "NONE"; frame.clipsContent = true;
+    frame.resizeWithoutConstraints(b.width, b.height);
+    frame.x = b.x; frame.y = b.y;
+    // Moving a clone out of an ancestor must not change inherited variable
+    // modes (e.g. a dark-theme color reverting to the collection default).
+    var collections = Object.keys(item.variableModes);
+    for (var i = 0; i < collections.length; i++) {
+      var collection = await figma.variables.getVariableCollectionByIdAsync(collections[i]);
+      if (!collection) throw new Error("Cannot preserve variable mode for " + collections[i]);
+      frame.setExplicitVariableModeForCollection(collection, item.variableModes[collections[i]]);
+    }
+    clone = item.node.clone();
+    frame.appendChild(clone);
+    clone.relativeTransform = [[t[0][0], t[0][1], t[0][2] - b.x], [t[1][0], t[1][1], t[1][2] - b.y]];
+    if (Math.abs(clone.width - item.width) > 0.001 || Math.abs(clone.height - item.height) > 0.001) throw new Error("Clone resized during raster export: " + item.id);
+    return await frame.exportAsync(options);
+  } finally {
+    try { if (clone && !clone.removed) clone.remove(); }
+    finally { if (frame && !frame.removed) frame.remove(); }
+  }
+}
+
+function rasterPixelSize(bytes, bounds) {
+  var signature = [137, 80, 78, 71, 13, 10, 26, 10];
+  if (bytes.length < 24 || signature.some(function(b, i) { return bytes[i] !== b; }) || bytes[12] !== 73 || bytes[13] !== 72 || bytes[14] !== 68 || bytes[15] !== 82) throw new Error("Invalid raster PNG");
+  function uint32(i) { return bytes[i] * 16777216 + bytes[i + 1] * 65536 + bytes[i + 2] * 256 + bytes[i + 3]; }
+  var width = uint32(16), height = uint32(20);
+  if (!width || !height || Math.abs(width - bounds.width * 2) > 1 || Math.abs(height - bounds.height * 2) > 1) throw new Error("Raster pixel size does not match expanded canvas");
+  return { width: width, height: height };
+}
+
+function serializeLetterSpacing(letterSpacing, fontSize) {
   if (!letterSpacing || isMixed(letterSpacing)) return "mixed";
+  var unit = readProp(letterSpacing, "unit", "PIXELS"), value = readProp(letterSpacing, "value", 0);
   return {
-    unit: readProp(letterSpacing, "unit", "PIXELS"),
-    value: readProp(letterSpacing, "value", 0)
+    unit: unit, value: value,
+    css: unit === "PERCENT" ? value / 100 + "em" : unit === "PIXELS" ? value + "px" : null,
+    pixels: unit === "PIXELS" ? value : unit === "PERCENT" && typeof fontSize === "number" ? fontSize * value / 100 : null
   };
 }
 
@@ -265,8 +374,13 @@ function serializeNodeBase(node) {
   base.absoluteTransform = readProp(node, "absoluteTransform", null);
   base.relativeTransform = readProp(node, "relativeTransform", null);
   base.renderBounds = readProp(node, "absoluteRenderBounds", null);
-  base.clipsContent = readProp(node, "clipsContent", false);
+  if (hasProp(node, "clipsContent")) base.clipsContent = readProp(node, "clipsContent", false);
   base.isMask = readProp(node, "isMask", false);
+  // Keep source semantics even where no single CSS declaration is equivalent.
+  var extraProps = ["maskType", "cornerSmoothing", "strokeTopWeight", "strokeRightWeight", "strokeBottomWeight", "strokeLeftWeight", "strokeCap", "strokeJoin", "strokeMiterLimit", "dashPattern", "layoutAlign", "layoutGrow", "layoutPositioning", "layoutSizingHorizontal", "layoutSizingVertical", "minWidth", "maxWidth", "minHeight", "maxHeight", "overflowDirection", "itemReverseZIndex", "strokesIncludedInLayout"];
+  for (var p = 0; p < extraProps.length; p++) {
+    if (hasProp(node, extraProps[p])) base[extraProps[p]] = serializeMixedValue(readProp(node, extraProps[p], null));
+  }
   if (hasProp(node, "rotation")) base.rotation = readProp(node, "rotation", 0);
   if (hasProp(node, "opacity")) base.opacity = readProp(node, "opacity", 1);
   if (hasProp(node, "blendMode")) base.blendMode = readProp(node, "blendMode", "PASS_THROUGH");
@@ -307,8 +421,13 @@ function serializeNodeBase(node) {
     base.textAlignHorizontal = readProp(node, "textAlignHorizontal", "LEFT");
     base.textAlignVertical = readProp(node, "textAlignVertical", "TOP");
     base.lineHeight = serializeLineHeight(readProp(node, "lineHeight", null), base.fontSize);
-    base.letterSpacing = serializeLetterSpacing(readProp(node, "letterSpacing", null));
+    base.letterSpacing = serializeLetterSpacing(readProp(node, "letterSpacing", null), base.fontSize);
     base.textDecoration = serializeMixedValue(readProp(node, "textDecoration", "mixed"));
+    base.textColor = serializeTextColor(base.fills);
+    var textProps = ["textAutoResize", "textTruncation", "maxLines", "textCase", "paragraphSpacing", "paragraphIndent", "listSpacing", "hangingPunctuation", "hangingList", "leadingTrim"];
+    for (var p = 0; p < textProps.length; p++) {
+      if (hasProp(node, textProps[p])) base[textProps[p]] = serializeMixedValue(readProp(node, textProps[p], null));
+    }
   }
 
   var layoutMode = readProp(node, "layoutMode", "NONE");
@@ -323,7 +442,10 @@ function serializeNodeBase(node) {
       primaryAxisAlignItems: readProp(node, "primaryAxisAlignItems", "MIN"),
       counterAxisAlignItems: readProp(node, "counterAxisAlignItems", "MIN"),
       primaryAxisSizingMode: readProp(node, "primaryAxisSizingMode", "AUTO"),
-      counterAxisSizingMode: readProp(node, "counterAxisSizingMode", "AUTO")
+      counterAxisSizingMode: readProp(node, "counterAxisSizingMode", "AUTO"),
+      layoutWrap: readProp(node, "layoutWrap", "NO_WRAP"),
+      counterAxisSpacing: readProp(node, "counterAxisSpacing", 0),
+      counterAxisAlignContent: readProp(node, "counterAxisAlignContent", "AUTO")
     };
   }
 
@@ -338,7 +460,8 @@ async function serializeNodeAsync(node, context) {
   if (!shouldExportNode(node)) return null;
   var base = serializeNodeBase(node);
 
-  var rasterReason = textRasterReason(node, base);
+  if (context) await resolveAutoLineHeight(node, base);
+  var rasterReason = textRasterReason(node, base) || gradientRasterReason(base);
   var visibleChildren = readProp(node, "children", []).filter(shouldExportNode);
   var imageLeaf = collectImageHashesFromNode(node).length > 0 && visibleChildren.length === 0;
   var shape = context && context.shapeGroupsAsImages &&
@@ -348,9 +471,10 @@ async function serializeNodeAsync(node, context) {
     base.assetId = "node-" + base.id;
     base.rasterReason = rasterReason || (imageLeaf ? "image-paint" : "composite-shape");
     base.collapsedNodeIds = visibleDescendantIds(node);
+    base.imageBounds = rasterBoundsOf(base);
     // Retain original image bytes as well as the faithful cropped/filtered PNG.
     if (!imageLeaf) delete base._imageHashes;
-    context.rasters.push({ id: base.assetId, node: node, bounds: base.absoluteBounds, kind: base.type === "TEXT" ? "text" : imageLeaf ? "image-render" : "shape", reason: base.rasterReason });
+    context.rasters.push({ id: base.assetId, node: node, width: base.width, height: base.height, bounds: base.imageBounds, layoutBounds: base.absoluteBounds, transform: base.absoluteTransform, variableModes: readProp(node, "resolvedVariableModes", {}), kind: base.type === "TEXT" ? "text" : imageLeaf ? "image-render" : "shape", reason: base.rasterReason });
     return base;
   }
 
@@ -454,7 +578,8 @@ figma.ui.onmessage = async function(msg) {
       if (n) { nodes.push(n); names.push(n.name); addRelativeBounds(n, n, null); }
     }
     if (!nodes.length) throw new Error("选中的节点均已隐藏或透明度为 0，没有可导出的可见节点");
-    var data = { meta: { schemaVersion: 3, exporterVersion: "3.1.0", exportedAt: new Date().toISOString(), nodeName: names.join("+"), nodeCount: nodes.length }, nodes: nodes, images: {}, assets: {} };
+    var data = { meta: { schemaVersion: 3, exporterVersion: "3.4.0", exportedAt: new Date().toISOString(), nodeName: names.join("+"), nodeCount: nodes.length }, nodes: nodes, images: {}, assets: {} };
+    data.meta.documentColorProfile = readProp(readProp(figma, "root", {}), "documentColorProfile", "LEGACY");
     var hashes = {};
     for (var i = 0; i < nodes.length; i++) {
       var collected = collectImageHashes(nodes[i]);
@@ -472,8 +597,9 @@ figma.ui.onmessage = async function(msg) {
     }
     for (var i = 0; i < context.rasters.length; i++) {
       var item = context.rasters[i];
-      var bytes = await item.node.exportAsync({ format: "PNG", constraint: { type: "SCALE", value: 2 }, contentsOnly: true, useAbsoluteBounds: true });
-      data.assets[item.id] = { id: item.id, kind: item.kind, rasterReason: item.reason, nodeId: item.node.id, scale: 2, bounds: item.bounds, opacityBaked: true };
+      var bytes = await exportRaster(item);
+      var pixels = rasterPixelSize(bytes, item.bounds);
+      data.assets[item.id] = { id: item.id, kind: item.kind, rasterReason: item.reason, nodeId: item.node.id, scale: 2, bounds: item.bounds, layoutBounds: item.layoutBounds, pixelWidth: pixels.width, pixelHeight: pixels.height, colorProfile: "SRGB", opacityBaked: true };
       figma.ui.postMessage(wrapMsg({ type: "image", hash: item.id, bytes: Array.from(bytes) }, rid));
       imageCount++;
     }

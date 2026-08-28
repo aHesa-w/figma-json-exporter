@@ -3,7 +3,7 @@ import { WebSocket } from "ws";
 import { persistExport, type ExportOptions } from "./assets.js";
 
 export const SERVER_NAME = "figma-json-exporter";
-export const SERVER_VERSION = "3.1.0";
+export const SERVER_VERSION = "3.4.0";
 export const EXPORT_TIMEOUT_MS = 120_000;
 
 export interface Exporter {

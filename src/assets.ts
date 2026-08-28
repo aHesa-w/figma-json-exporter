@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
-import { collectLayout, flattenLayers, prepareDesign, validateLayout, type ActualLayout } from "./geometry.js";
+import { COLLECTOR_VERSION, collectLayout, flattenLayers, prepareDesign, rect, validateLayout, type ActualLayout } from "./geometry.js";
 
 export interface ExportOptions { outputDir?: string; shapeGroupsAsImages?: boolean }
 export interface AssetBytes { id: string; bytes: Buffer }
@@ -18,7 +18,7 @@ export function imageFormat(bytes: Buffer): { extension: string; mimeType: strin
 export async function persistExport(input: unknown, assets: Map<string, Buffer>, options: ExportOptions, signal?: AbortSignal) {
   signal?.throwIfAborted();
   const design = prepareDesign(input);
-  if (design.meta.exporterVersion !== "3.1.0") throw new Error("Figma plugin v3.1.0 is required for font/image rasterization and unit-safe line-height. Close and reopen JSON Exporter, then export again");
+  if (design.meta.exporterVersion !== "3.4.0") throw new Error("Figma plugin v3.4.0 is required for complete rendering-property exports. Close and reopen JSON Exporter, then export again");
   const output = options.outputDir ?? process.env.FIGMA_EXPORT_DIR ?? join(homedir(), "Downloads", "figma-json-exporter");
   if (!isAbsolute(output)) throw new Error("outputDir must be an absolute local directory");
   const layers = flattenLayers(design);
@@ -44,6 +44,15 @@ export async function persistExport(input: unknown, assets: Map<string, Buffer>,
       signal?.throwIfAborted();
       const bytes = assets.get(id)!;
       const format = imageFormat(bytes);
+      const metadata = design.assets[id];
+      const raster = layers.find((layer) => layer.assetId === id && layer.imageBounds);
+      if (raster) {
+        if (format.extension !== "png" || bytes.length < 24 || bytes.toString("ascii", 12, 16) !== "IHDR") throw new Error(`Invalid raster PNG: ${id}`);
+        const width = bytes.readUInt32BE(16), height = bytes.readUInt32BE(20);
+        const bounds = rect(metadata?.bounds), scale = metadata?.scale;
+        if (JSON.stringify(bounds) !== JSON.stringify(raster.imageBounds) || scale !== 2 || !width || !height || Math.abs(width - bounds.width * scale) > 1 || Math.abs(height - bounds.height * scale) > 1) throw new Error(`Raster pixel size/bounds mismatch: ${id}; refusing clipped or incorrectly sized image`);
+        metadata.pixelWidth = width; metadata.pixelHeight = height;
+      }
       const hash = createHash("sha256").update(bytes).digest("hex");
       const relativePath = `images/${hash}.${format.extension}`;
       await writeFile(join(staging, relativePath), bytes);
@@ -56,10 +65,12 @@ export async function persistExport(input: unknown, assets: Map<string, Buffer>,
     design.meta.exportDirectory = directory;
     design.meta.designPath = join(directory, "design.json");
     design.meta.layoutPath = join(directory, "layout.json");
+    design.meta.implementationPath = join(directory, "implementation.json");
     design.meta.collectorPath = join(directory, "collect-layout.js");
     design.meta.collectorExpressionPath = join(directory, "collector-expression.js");
-    design.meta.validation = { attribute: "data-d2c-id", rootAttribute: "data-d2c-root", coordinateSpace: "root-relative", tolerance: 1, required: true };
-    await writeFile(join(staging, "layout.json"), JSON.stringify(layers.map(({ id, name, type, parentId, rootId, depth, absoluteBounds, relativeBounds, localBounds, renderAs, assetId }) => ({ id, name, type, parentId, rootId, depth, absoluteBounds, relativeBounds, localBounds, renderAs, assetId })), null, 2));
+    design.meta.validation = { attribute: "data-d2c-id", rootAttribute: "data-d2c-root", coordinateSpace: "root-relative", tolerance: 1, required: true, collectorVersion: COLLECTOR_VERSION, propertyChecksRequired: true, visualReviewRequired: true };
+    await writeFile(join(staging, "layout.json"), JSON.stringify(layers.map(({ id, name, type, parentId, rootId, depth, absoluteBounds, relativeBounds, localBounds, renderAs, assetId, imageBounds, imagePlacement, relativeImageBounds, gradient, implementation }) => ({ id, name, type, parentId, rootId, depth, absoluteBounds, relativeBounds, localBounds, renderAs, assetId, imageBounds, imagePlacement, relativeImageBounds, gradient, implementation })), null, 2));
+    await writeFile(join(staging, "implementation.json"), JSON.stringify({ instructions: "Read design.json for source values. Follow each layer's rules and checks; never silently drop properties. Review items are NOT automatically verified. passed=true only covers automated checks, not full visual acceptance.", layers: layers.map(({ id, name, implementation }) => ({ id, name, ...implementation })) }, null, 2));
     await writeFile(join(staging, "collect-layout.js"), `window.collectFigmaLayout = ${collectLayout.toString()};\n`);
     await writeFile(join(staging, "collector-expression.js"), `(${collectLayout.toString()})()`);
     await writeFile(join(staging, "design.json"), JSON.stringify(design, null, 2));

@@ -12,7 +12,7 @@ import { WebSocket } from "ws";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { node, pluginFixture } from "./plugin-fixture.mjs";
+import { node, pluginFixture, renderStyle } from "./plugin-fixture.mjs";
 
 async function availablePort() {
   const server = createServer();
@@ -62,14 +62,14 @@ async function fixture(t) {
   return { base, entry, env, client, plugin };
 }
 
-const exportData = (id = "fixture") => ({ meta: { schemaVersion: 3, exporterVersion: "3.1.0" }, assets: {}, nodes: [{ id, name: id, type: "FRAME", absoluteBounds: { x: 10, y: 20, width: 100, height: 100 } }] });
+const exportData = (id = "fixture") => ({ meta: { schemaVersion: 3, exporterVersion: "3.4.0" }, assets: {}, nodes: [{ id, name: id, type: "FRAME", absoluteBounds: { x: 10, y: 20, width: 100, height: 100 } }] });
 const payload = (result) => JSON.parse(result.content[0].text);
 
 test("standalone compiled entry auto-starts shared service; stdio and HTTP expose MCP tools/errors", { timeout: 15000 }, async (t) => {
   const f = await fixture(t);
   const stdio = await f.client();
   const http = await f.client("http");
-  assert.equal((await (await fetch(f.base + "/health")).json()).version, "3.1.0");
+  assert.equal((await (await fetch(f.base + "/health")).json()).version, "3.4.0");
   for (const client of [stdio, http]) {
     assert.deepEqual((await client.listTools()).tools.map((tool) => tool.name).sort(), ["figma_export", "figma_status", "figma_validate_layout"]);
     assert.equal(payload(await client.callTool({ name: "figma_status", arguments: {} })).connected, false);
@@ -229,7 +229,7 @@ test("MCP returns real local image paths only after bytes are written, and valid
   const f = await fixture(t);
   const client = await f.client();
   const socket = await f.plugin();
-  const fixturePlugin = pluginFixture([node("root", { children: [node("icon", { type: "GROUP", children: [node("vector", { type: "VECTOR" })] }), node("photo", { fills: [{ type: "IMAGE", imageHash: "photo" }] })] })]);
+  const fixturePlugin = pluginFixture([node("root", { clipsContent: true, opacity: 0.6, cornerRadius: 12, fills: [{ type: "GRADIENT_LINEAR", gradientTransform: [[1, 0, 0], [0, 1, 0]], gradientStops: [{ position: 0, color: { r: 1, g: 0, b: 0, a: 1 } }, { position: 1, color: { r: 0, g: 0, b: 1, a: 0.5 } }] }], children: [node("icon", { type: "GROUP", children: [node("vector", { type: "VECTOR" })] }), node("photo", { fills: [{ type: "IMAGE", imageHash: "photo" }] }), node("text", { type: "TEXT", lineHeight: { unit: "AUTO" }, async getCSSAsync() { return { "line-height": "21.5px" }; } })] })]);
   socket.on("message", async (raw) => {
     const request = JSON.parse(raw.toString());
     await fixturePlugin.request(request.requestId);
@@ -241,8 +241,11 @@ test("MCP returns real local image paths only after bytes are written, and valid
   const saved = payload(exported);
   assert.equal(saved.meta.exportDirectory.startsWith(outputDir + "/"), true);
   assert.equal(Object.keys(saved.assets).length, 3);
+  assert.equal(saved.nodes[0].gradient.angleDeg, 90);
+  const layout = JSON.parse(await readFile(saved.meta.layoutPath, "utf8"));
+  assert.deepEqual(layout[0].gradient, saved.nodes[0].gradient);
   for (const asset of Object.values(saved.assets)) { await access(asset.path); assert.equal((await readFile(asset.path)).length, asset.byteLength); }
-  const measured = { coordinateSpace: "root-relative", stable: true, fontsReady: true, brokenImages: [], nodes: [saved.nodes[0], ...saved.nodes[0].children].map((n) => ({ id: n.id, rootId: n.rootId, parentId: n.parentId, visible: true, bounds: n.relativeBounds, tagName: n.assetId ? "IMG" : "DIV", imageSources: n.assetId ? [saved.assets[n.assetId].path] : [] })) };
+  const measured = { collectorVersion: 4, coordinateSpace: "root-relative", stable: true, fontsReady: true, brokenImages: [], nodes: [saved.nodes[0], ...saved.nodes[0].children].map((n) => ({ id: n.id, rootId: n.rootId, parentId: n.parentId, visible: true, bounds: n.relativeBounds, tagName: n.assetId ? "IMG" : "DIV", imageSources: n.assetId ? [saved.assets[n.assetId].path] : [], textStyle: n.type === "TEXT" ? { fontSize: n.fontSize, lineHeight: n.lineHeight.pixels, fontWeight: n.fontWeight, fontStyle: "normal", letterSpacing: 0, textAlign: "left", direction: "ltr", textDecorationLine: "none", color: n.textColor.css, textFillColor: n.textColor.css } : undefined, assetImages: n.assetId ? [{ assetId: n.assetId, src: saved.assets[n.assetId].path, bounds: n.relativeImageBounds, naturalWidth: saved.assets[n.assetId].pixelWidth, naturalHeight: saved.assets[n.assetId].pixelHeight, opacity: 1, objectFit: "fill" }] : [], renderStyle: renderStyle(n.id === "root" ? { ...n.gradient, backgroundImage: n.gradient.css, opacity: 0.6, overflowX: "hidden", overflowY: "hidden", cornerRadii: Array(4).fill("12px") } : {}) })) };
   // Synthetic measurements exercise the MCP comparison API, not browser rendering.
   measured.nodes[1].bounds = { ...measured.nodes[1].bounds, x: 10 };
   const failed = payload(await client.callTool({ name: "figma_validate_layout", arguments: { designPath: saved.meta.designPath, actual: measured } }));
@@ -253,5 +256,23 @@ test("MCP returns real local image paths only after bytes are written, and valid
   await writeFile(actualPath, JSON.stringify(measured));
   const passed = payload(await client.callTool({ name: "figma_validate_layout", arguments: { designPath: saved.meta.designPath, actualPath } }));
   assert.equal(passed.passed, true);
+  assert.equal(passed.visualAcceptance, "not-verified");
   await access(passed.reportPath);
+  // Exercise inline schema retention as well as the actualPath route above.
+  const inlinePassed = payload(await client.callTool({ name: "figma_validate_layout", arguments: { designPath: saved.meta.designPath, actual: measured } }));
+  assert.equal(inlinePassed.passed, true);
+  measured.nodes[0].renderStyle.overflowY = "visible";
+  const propertyFailed = payload(await client.callTool({ name: "figma_validate_layout", arguments: { designPath: saved.meta.designPath, actual: measured } }));
+  assert.equal(propertyFailed.passed, false);
+  assert.equal(propertyFailed.failed[0].propertyMismatches[0].property, "clipsContent");
+  measured.nodes[0].renderStyle.overflowY = "hidden";
+  measured.nodes[3].textStyle.color = "rgb(255, 0, 0)";
+  const wrongColor = payload(await client.callTool({ name: "figma_validate_layout", arguments: { designPath: saved.meta.designPath, actual: measured } }));
+  assert.equal(wrongColor.passed, false);
+  assert.equal(wrongColor.failed[0].propertyMismatches[0].property, "textColor.color");
+  measured.nodes[3].textStyle.color = saved.nodes[0].children[2].textColor.css;
+  measured.nodes[0].renderStyle.backgroundImage = saved.nodes[0].gradient.css.replace("90deg", "180deg");
+  const wrongGradient = payload(await client.callTool({ name: "figma_validate_layout", arguments: { designPath: saved.meta.designPath, actual: measured } }));
+  assert.equal(wrongGradient.passed, false);
+  assert.equal(wrongGradient.failed[0].propertyMismatches[0].property, "gradient-direction");
 });

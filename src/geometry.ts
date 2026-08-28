@@ -1,3 +1,8 @@
+import { renderingRequirements, validateRendering, type RenderStyle, type TextStyle } from "./rendering.js";
+import { linearGradient } from "./gradients.js";
+
+export const COLLECTOR_VERSION = 4;
+
 export interface Rect {
   x: number; y: number; width: number; height: number;
   left: number; top: number; right: number; bottom: number;
@@ -6,6 +11,8 @@ export interface Layer {
   id: string; name: string; type: string; rootId: string; parentId: string | null;
   absoluteBounds: Rect; relativeBounds: Rect; localBounds: Rect;
   renderAs?: string; assetId?: string; collapsedNodeIds?: string[];
+  implementation?: ReturnType<typeof renderingRequirements>;
+  imageBounds?: Rect; imagePlacement?: Rect; relativeImageBounds?: Rect;
   children?: Layer[];
   [key: string]: unknown;
 }
@@ -43,6 +50,15 @@ export function prepareDesign(input: unknown): Design {
     layer.relativeBounds = rect({ x: b.x - origin.x, y: b.y - origin.y, width: b.width, height: b.height });
     layer.localBounds = rect({ x: b.x - p.x, y: b.y - p.y, width: b.width, height: b.height });
     if (layer.renderAs === "image" && layer.children?.length) throw new Error(`Collapsed image layer ${layer.id} must be a leaf`);
+    if (layer.imageBounds) {
+      layer.imageBounds = rect(layer.imageBounds);
+      const image = layer.imageBounds;
+      if (image.left > b.left || image.top > b.top || image.right < b.right || image.bottom < b.bottom) throw new Error(`Raster canvas must contain layout bounds: ${layer.id}`);
+      layer.imagePlacement = rect({ x: image.x - b.x, y: image.y - b.y, width: image.width, height: image.height });
+      layer.relativeImageBounds = rect({ x: image.x - origin.x, y: image.y - origin.y, width: image.width, height: image.height });
+    }
+    layer.implementation = renderingRequirements(layer);
+    layer.gradient = linearGradient(layer);
     for (const child of layer.children ?? []) visit(child, root, layer);
   }
   for (const root of design.nodes) visit(root, root, null);
@@ -65,9 +81,12 @@ export interface ActualLayer {
   visible: boolean;
   tagName?: string;
   imageSources?: string[];
-  textStyle?: { fontSize: number | null; lineHeight: number | null };
+  textStyle?: TextStyle;
+  renderStyle?: RenderStyle;
+  assetImages?: Array<{ assetId: string; src: string; bounds: { x: number; y: number; width: number; height: number }; naturalWidth: number; naturalHeight: number; opacity: number | null; objectFit: string }>;
 }
 export interface ActualLayout {
+  collectorVersion?: number;
   coordinateSpace: "root-relative";
   nodes: ActualLayer[];
   stable: boolean;
@@ -108,34 +127,48 @@ export function validateLayout(designInput: unknown, actual: ActualLayout, toler
     const missingAssets = assetIds.filter((id) => {
       const asset = design.assets[id];
       const filename = String(asset?.relativePath ?? asset?.path ?? "").split("/").pop();
-      return !filename || !(found.imageSources ?? []).some((src) => {
+      const sources = node.imageBounds ? (found.assetImages ?? []).filter((img) => img.assetId === node.assetId).map((img) => img.src) : found.imageSources ?? [];
+      return !filename || !sources.some((src) => {
         try { return decodeURIComponent(new URL(src, "http://local.invalid/").pathname).split("/").pop() === filename; } catch { return false; }
       });
     });
-    const imageMatches = !missingAssets.length && (!node.assetId || found.tagName === "IMG");
+    const imageMatches = !missingAssets.length && (!node.assetId || !!node.imageBounds || found.tagName === "IMG");
     const lineHeight = node.lineHeight as { unit?: string; value?: number; pixels?: number | null } | undefined;
-    const expectedLineHeight = lineHeight?.unit === "PIXELS" ? lineHeight.value : lineHeight?.unit === "PERCENT" && typeof node.fontSize === "number" ? node.fontSize * lineHeight.value! / 100 : null;
+    const expectedLineHeight = lineHeight?.unit === "PIXELS" ? lineHeight.value : lineHeight?.unit === "PERCENT" && typeof node.fontSize === "number" ? node.fontSize * lineHeight.value! / 100 : lineHeight?.unit === "AUTO" ? lineHeight.pixels : null;
     const checkLineHeight = node.type === "TEXT" && node.renderAs !== "image" && typeof expectedLineHeight === "number" && Number.isFinite(expectedLineHeight);
     const actualLineHeight = found.textStyle?.lineHeight;
     const lineHeightMatches = !checkLineHeight || (typeof actualLineHeight === "number" && Math.abs(actualLineHeight - expectedLineHeight!) <= tolerance);
+    const propertyMismatches = validateRendering(node, found, design, tolerance);
     return {
       id: node.id, name: node.name, depth: node.depth, parentId: node.parentId,
-      passed: maxError <= tolerance && hierarchyMatches && imageMatches && lineHeightMatches && found.visible === true && !duplicates.includes(node.id),
-      reason: duplicates.includes(node.id) ? "duplicate-id" : !found.visible ? "hidden-in-implementation" : !hierarchyMatches ? "hierarchy-mismatch" : !imageMatches ? "image-missing-or-wrong-source" : !lineHeightMatches ? "line-height-mismatch" : maxError > tolerance ? "geometry-mismatch" : "matched",
+      passed: maxError <= tolerance && hierarchyMatches && imageMatches && lineHeightMatches && !propertyMismatches.length && found.visible === true && !duplicates.includes(node.id),
+      reason: duplicates.includes(node.id) ? "duplicate-id" : !found.visible ? "hidden-in-implementation" : !hierarchyMatches ? "hierarchy-mismatch" : !imageMatches ? "image-missing-or-wrong-source" : !lineHeightMatches ? "line-height-mismatch" : propertyMismatches.length ? "rendering-property-mismatch" : maxError > tolerance ? "geometry-mismatch" : "matched",
       expected: node.relativeBounds, actual: bounds, delta, maxError,
-      missingAssets, ...(checkLineHeight ? { expectedLineHeight, actualLineHeight: actualLineHeight ?? null } : {}),
+      missingAssets, propertyMismatches, ...(checkLineHeight ? { expectedLineHeight, actualLineHeight: actualLineHeight ?? null } : {}),
     };
   });
   const failed = layers.filter((n) => !n.passed).sort((a, b) => a.depth - b.depth);
   const environmentReady = actual.stable === true && actual.fontsReady === true && !(actual.brokenImages?.length);
+  const collectorCompatible = actual.collectorVersion === COLLECTOR_VERSION && actual.nodes.every((n) => {
+    const style = n.renderStyle;
+    return style && typeof style.opacity === "number" && Number.isFinite(style.opacity)
+      && [style.position, style.overflowX, style.overflowY, style.clipPath, style.maskImage, style.contain].every((v) => typeof v === "string")
+      && [style.borderBoxWidth, style.borderBoxHeight].every((v) => v === null || (typeof v === "number" && Number.isFinite(v)))
+      && Array.isArray(style.cornerRadii) && style.cornerRadii.length === 4 && style.cornerRadii.every((v) => typeof v === "string")
+      && Array.isArray(style.wrapperEffects) && style.wrapperEffects.every((v) => typeof v === "string");
+  });
+  const reviewRequired = expected.filter((n) => n.implementation!.review.length).map((n) => ({ id: n.id, name: n.name, properties: n.implementation!.review }));
   return {
-    passed: failed.length === 0 && duplicates.length === 0 && unexpected.length === 0 && environmentReady,
-    scope: "geometry, image references and explicit line-height; not pixel, font-glyph or interaction equivalence",
+    passed: failed.length === 0 && duplicates.length === 0 && unexpected.length === 0 && environmentReady && collectorCompatible,
+    scope: "automated geometry, image references/placement/pixel dimensions, clipping, opacity, ordinary corner radii, text metrics/colors and linear gradient direction/stops/paint box only; not full visual or interaction acceptance",
+    collectorCompatible, requiredCollectorVersion: COLLECTOR_VERSION,
+    visualAcceptance: "not-verified", reviewRequired,
+    sourceCoverage: design.meta.exporterVersion === "3.4.0" ? "v3.4" : "legacy export: newly added properties may be absent; re-export for full property coverage",
     tolerance, total: layers.length, matched: layers.length - failed.length,
     missing, duplicates, unexpected, environmentReady,
     stable: actual.stable, fontsReady: actual.fontsReady, brokenImages: actual.brokenImages ?? [],
     maxError: Math.max(0, ...layers.map((n) => "maxError" in n ? n.maxError : 0)),
-    nextAction: failed.length ? "Fix parent layers first; preserve data-d2c-id; collect real DOM rectangles again and validate until passed. Do not edit target bounds or invent actual values." : !environmentReady ? "Wait for fonts, images and stable layout, then collect again" : unexpected.length || duplicates.length ? "Fix duplicate/unexpected IDs, then collect again" : "Geometry passed; perform visual and interaction review separately",
+    nextAction: !collectorCompatible ? "Run the NEW exported collector; legacy or incomplete measurements cannot pass" : failed.length ? "Fix parent layers and propertyMismatches first; preserve data-d2c-id; remeasure until passed. Do not edit targets or invent measurements." : !environmentReady ? "Wait for fonts, images and stable layout, then collect again" : unexpected.length || duplicates.length ? "Fix duplicate/unexpected IDs, then collect again" : "Automated checks passed ONLY. Inspect reviewRequired and perform visual/interaction review; do not claim full fidelity from this report.",
     failed, layers,
   };
 }
@@ -150,9 +183,33 @@ export async function collectLayout(): Promise<ActualLayout> {
       const root = element.closest<HTMLElement>("[data-d2c-root]");
       const box = element.getBoundingClientRect(), origin = root?.getBoundingClientRect();
       const computed = getComputedStyle(element);
+      const number = (value: string) => Number.isFinite(Number.parseFloat(value)) ? Number.parseFloat(value) : null;
+      const dimension = (axis: "width" | "height") => {
+        const size = number(computed[axis]);
+        if (size === null || computed.boxSizing === "border-box") return size;
+        const sides = axis === "width" ? [computed.paddingLeft, computed.paddingRight, computed.borderLeftWidth, computed.borderRightWidth] : [computed.paddingTop, computed.paddingBottom, computed.borderTopWidth, computed.borderBottomWidth];
+        return size + sides.reduce((sum, v) => sum + (number(v) ?? 0), 0);
+      };
+      const wrapperEffects: string[] = [];
+      // Only intermediate wrappers inside a selection root are part of this
+      // contract; the page hosting separate selection roots is not a design node.
+      if (element !== root) for (let wrapper = element.parentElement; wrapper && !wrapper.hasAttribute("data-d2c-id"); wrapper = wrapper.parentElement) {
+        const css = getComputedStyle(wrapper);
+        for (const prop of ["overflowX", "overflowY", "clipPath", "maskImage", "filter", "backdropFilter", "mixBlendMode", "opacity", "contain"] as const) {
+          const value = css[prop];
+          const unsafe = prop === "opacity" ? Number(value) !== 1 : prop === "contain" ? /\b(paint|strict|content)\b/.test(value) : !!value && !["visible", "none", "normal"].includes(value);
+          if (unsafe) wrapperEffects.push(`${prop}:${value}`);
+        }
+      }
       const imageSources: string[] = [];
       if (element.tagName === "IMG") imageSources.push((element as unknown as HTMLImageElement).currentSrc || (element as unknown as HTMLImageElement).src);
       for (const match of (computed.backgroundImage || "").matchAll(/url\(["']?([^"')]+)["']?\)/g)) imageSources.push(match[1]!);
+      const assetImages = [element, ...Array.from(element.querySelectorAll<HTMLElement>("img[data-d2c-asset]"))]
+        .filter((img) => img.tagName === "IMG" && img.dataset.d2cAsset && img.closest("[data-d2c-id]") === element)
+        .map((el) => {
+          const img = el as HTMLImageElement, b = img.getBoundingClientRect(), css = getComputedStyle(img);
+          return { assetId: img.dataset.d2cAsset!, src: img.currentSrc || img.src, bounds: { x: b.x - (origin?.x ?? 0), y: b.y - (origin?.y ?? 0), width: b.width, height: b.height }, naturalWidth: img.naturalWidth, naturalHeight: img.naturalHeight, opacity: number(css.opacity), objectFit: css.objectFit };
+        });
       let visible = true;
       for (let current: HTMLElement | null = element; current; current = current.parentElement) {
         const style = getComputedStyle(current);
@@ -162,8 +219,9 @@ export async function collectLayout(): Promise<ActualLayout> {
         id: element.dataset.d2cId!, rootId: root?.dataset.d2cId ?? null,
         parentId: element === root ? null : element.parentElement?.closest<HTMLElement>("[data-d2c-id]")?.dataset.d2cId ?? null,
         bounds: { x: box.x - (origin?.x ?? 0), y: box.y - (origin?.y ?? 0), width: box.width, height: box.height }, visible,
-        tagName: element.tagName, imageSources,
-        textStyle: { fontSize: Number.parseFloat(computed.fontSize) || null, lineHeight: computed.lineHeight === "normal" ? null : Number.parseFloat(computed.lineHeight) || null },
+        tagName: element.tagName, imageSources, assetImages,
+        renderStyle: { backgroundImage: computed.backgroundImage, backgroundOrigin: computed.backgroundOrigin, backgroundClip: computed.backgroundClip, backgroundSize: computed.backgroundSize, backgroundPosition: computed.backgroundPosition, opacity: number(computed.opacity), position: computed.position, overflowX: computed.overflowX, overflowY: computed.overflowY, clipPath: computed.clipPath, maskImage: computed.maskImage, contain: computed.contain, borderBoxWidth: dimension("width"), borderBoxHeight: dimension("height"), cornerRadii: [computed.borderTopLeftRadius, computed.borderTopRightRadius, computed.borderBottomRightRadius, computed.borderBottomLeftRadius], wrapperEffects },
+        textStyle: { color: computed.color, textFillColor: computed.webkitTextFillColor || computed.color, fontSize: number(computed.fontSize), lineHeight: computed.lineHeight === "normal" ? null : number(computed.lineHeight), fontWeight: number(computed.fontWeight), fontStyle: computed.fontStyle, letterSpacing: computed.letterSpacing === "normal" ? 0 : number(computed.letterSpacing), textAlign: computed.textAlign, direction: computed.direction, textDecorationLine: computed.textDecorationLine },
       };
     });
   }
@@ -176,7 +234,7 @@ export async function collectLayout(): Promise<ActualLayout> {
     previous = nodes;
   }
   return {
-    coordinateSpace: "root-relative", nodes, stable, fontsReady: document.fonts.status === "loaded",
+    collectorVersion: 4, coordinateSpace: "root-relative", nodes, stable, fontsReady: document.fonts.status === "loaded",
     brokenImages: Array.from(document.images).filter((img) => !img.complete || !img.naturalWidth).map((img) => img.currentSrc || img.src),
     viewport: { width: innerWidth, height: innerHeight, devicePixelRatio },
   };
