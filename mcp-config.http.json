@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "figma-json-exporter": {
+      "description": "Figma JSON Exporter - local Streamable HTTP",
+      "url": "http://127.0.0.1:3456/mcp"
+    }
+  }
+}

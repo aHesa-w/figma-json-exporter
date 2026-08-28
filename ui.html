@@ -46,7 +46,7 @@
     .status.success { background: #e8fdf0; color: #1a7a3f; display: block; }
     .divider { border: none; border-top: 1px solid #eee; }
 
-    /* Agent 连接状态指示器 */
+    /* MCP 服务状态指示器 */
     .agent-bar {
       display: flex;
       align-items: center;
@@ -64,23 +64,44 @@
     }
     .agent-dot.connected { background: #2ecc71; }
     .agent-dot.disconnected { background: #e74c3c; }
+    .mcp-actions {
+      display: flex;
+      gap: 4px;
+      margin-left: auto;
+    }
+    .btn-mcp {
+      padding: 2px 8px;
+      border-radius: 4px;
+      border: 1px solid #ddd;
+      background: #f5f5f5;
+      color: #666;
+      font-size: 11px;
+      cursor: pointer;
+    }
+    .btn-mcp:hover { background: #e8e8e8; }
+    .btn-mcp:disabled { opacity: 0.45; cursor: default; }
   </style>
   <!-- JSZip：打包 zip 用 -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 </head>
 <body>
   <h2>JSON Exporter</h2>
-  <p class="desc">导出选中节点的完整结构数据，包含样式、约束、Auto Layout 和图片资源。</p>
+  <p class="desc">导出选中节点的结构与图片资源，自动排除隐藏、透明度为 0 的节点及其子树。</p>
 
-  <!-- Agent 连接状态 -->
+  <!-- MCP 服务状态 -->
   <div class="agent-bar" id="agentBar">
     <span class="agent-dot disconnected" id="agentDot"></span>
-    <span id="agentLabel">Agent 未连接</span>
+    <span id="agentLabel">MCP 未启动</span>
+    <span class="mcp-actions">
+      <button class="btn-mcp" id="startMcpBtn">启动</button>
+      <button class="btn-mcp" id="stopMcpBtn" disabled>关闭</button>
+    </span>
   </div>
 
   <hr class="divider" />
 
   <div class="options">
+    <label><input type="checkbox" id="shapeGroupsAsImages" checked />组合形状整体导出为图片</label>
     <label>
       <input type="checkbox" id="includeImages" checked />
       包含图片资源（导出为 ZIP，图片单独存放）
@@ -92,90 +113,121 @@
   </div>
 
   <div class="btn-row">
-    <button class="btn-primary" id="exportBtn" onclick="startExport()">导出</button>
-    <button class="btn-secondary" onclick="cancel()">取消</button>
+    <button class="btn-primary" id="exportBtn">导出</button>
+    <button class="btn-secondary" id="cancelBtn">取消</button>
   </div>
 
   <div class="status" id="status"></div>
 
   <script>
     var imageBytesMap = {};
-    var AGENT_WS_URL = "ws://localhost:3456/ws";
+    var MCP_WS_URL = "ws://localhost:3456/ws";
+    var MCP_HTTP_URL = "http://localhost:3456";
     var ws = null;
     var wsReconnectTimer = null;
-    var remoteRequestId = null;  // 非 null 时表示由 Agent 远程触发
+    var remoteRequestId = null;
+    var remoteShapeGroupsAsImages = true;
+    var mcpReconnectEnabled = true;
 
-    // ── Agent WebSocket 连接 ──────────────────────────────────────────────
-
-    function setAgentStatus(connected) {
+    function setMcpStatus(connected) {
       var dot = document.getElementById("agentDot");
       var label = document.getElementById("agentLabel");
       dot.className = "agent-dot " + (connected ? "connected" : "disconnected");
-      label.textContent = connected ? "Agent 已连接" : "Agent 未连接";
+      label.textContent = connected ? "MCP 已启动" : "MCP 未启动";
+      document.getElementById("startMcpBtn").disabled = connected;
+      document.getElementById("stopMcpBtn").disabled = !connected;
     }
 
-    function connectAgent() {
-      if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
-
-      try {
-        ws = new WebSocket(AGENT_WS_URL);
-      } catch (e) {
-        setAgentStatus(false);
-        scheduleReconnect();
-        return;
+    function handleWsMessage(event) {
+      var msg;
+      try { msg = JSON.parse(event.data); } catch (e) { return; }
+      if (msg.type === "ping") {
+        ws.send(JSON.stringify({ type: "pong" }));
+      } else if (msg.type === "export") {
+        remoteRequestId = msg.requestId || null;
+        remoteShapeGroupsAsImages = msg.shapeGroupsAsImages !== false;
+        startExportInternal();
       }
+    }
 
-      ws.onopen = function() {
-        setAgentStatus(true);
+    function bindWsHandlers(c) {
+      c.onopen = function() {
+        setMcpStatus(true);
+        setStatus("MCP 已启动，可以由 Agent 调用当前 Figma 选区。", "success");
       };
-
-      ws.onmessage = function(event) {
-        var msg;
-        try {
-          msg = JSON.parse(event.data);
-        } catch (e) {
-          return;
-        }
-
-        if (msg.type === "ping") {
-          ws.send(JSON.stringify({ type: "pong" }));
-          return;
-        }
-
-        if (msg.type === "export") {
-          // Agent 远程触发导出
-          remoteRequestId = msg.requestId || null;
-          startExportInternal();
-          return;
-        }
+      c.onmessage = handleWsMessage;
+      c.onclose = function() {
+        setMcpStatus(false);
+        remoteRequestId = null;
+        if (mcpReconnectEnabled) scheduleReconnect();
       };
+      c.onerror = function() {};
+    }
 
-      ws.onclose = function() {
-        setAgentStatus(false);
-        if (remoteRequestId) {
-          // 连接断开，通知 Agent（但 Agent 端已经知道断开）
-          remoteRequestId = null;
-        }
+    function connectMcp() {
+      if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+      try {
+        ws = new WebSocket(MCP_WS_URL);
+        bindWsHandlers(ws);
+        setTimeout(function() {
+          if (!ws || ws.readyState !== WebSocket.OPEN) {
+            setStatus("本机 MCP 服务尚未运行；从 Agent 访问 MCP 后，JS 入口会自动启动服务。", "info");
+          }
+        }, 1200);
+      } catch (e) {
+        setMcpStatus(false);
         scheduleReconnect();
-      };
-
-      ws.onerror = function() {
-        // onclose 会触发重连
-      };
+      }
     }
 
     function scheduleReconnect() {
       if (wsReconnectTimer) clearTimeout(wsReconnectTimer);
-      wsReconnectTimer = setTimeout(connectAgent, 3000);
+      wsReconnectTimer = setTimeout(connectMcp, 3000);
     }
 
-    function sendToAgent(msg) {
+    function startMcp() {
+      mcpReconnectEnabled = true;
+      if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
+      if (ws) {
+        ws.onclose = null;
+        ws.onerror = null;
+        ws.close();
+        ws = null;
+      }
+      document.getElementById("agentLabel").textContent = "MCP 启动检测中...";
+      document.getElementById("agentDot").className = "agent-dot disconnected";
+      try {
+        ws = new WebSocket(MCP_WS_URL);
+        bindWsHandlers(ws);
+      } catch (e) {
+        setMcpStatus(false);
+        scheduleReconnect();
+      }
+    }
+
+    function stopMcp() {
+      mcpReconnectEnabled = false;
+      if (wsReconnectTimer) { clearTimeout(wsReconnectTimer); wsReconnectTimer = null; }
+      document.getElementById("agentLabel").textContent = "MCP 关闭中...";
+      fetch(MCP_HTTP_URL + "/control/shutdown", { method: "POST" })
+        .catch(function() {})
+        .then(function() {
+          if (ws) {
+            ws.onclose = null;
+            ws.onerror = null;
+            ws.close();
+            ws = null;
+          }
+          setMcpStatus(false);
+          setStatus("MCP 已关闭；下次 Agent 访问 MCP 时会自动重新启动。", "info");
+        });
+    }
+
+    function sendToMcp(msg) {
       if (ws && ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify(msg));
       }
     }
-
-    // ── UI 导出逻辑 ──────────────────────────────────────────────────────
 
     function setStatus(msg, type) {
       var el = document.getElementById("status");
@@ -184,7 +236,6 @@
     }
 
     function startExport() {
-      // 手动按钮触发，不是远程
       remoteRequestId = null;
       startExportInternal();
     }
@@ -196,7 +247,8 @@
       parent.postMessage({
         pluginMessage: {
           type: "export",
-          requestId: remoteRequestId
+          requestId: remoteRequestId,
+          shapeGroupsAsImages: remoteRequestId ? remoteShapeGroupsAsImages : document.getElementById("shapeGroupsAsImages").checked
         }
       }, "*");
     }
@@ -205,13 +257,11 @@
       parent.postMessage({ pluginMessage: { type: "cancel" } }, "*");
     }
 
-    // 把节点树里的 _imageHashes 清理掉（不对外暴露内部字段）
     function cleanHashes(n) {
       delete n._imageHashes;
       if (n.children) n.children.forEach(cleanHashes);
     }
 
-    // 下载纯 JSON（无图片）
     function downloadJSON(data) {
       var pretty = document.getElementById("prettyPrint").checked;
       data.nodes.forEach(cleanHashes);
@@ -228,7 +278,6 @@
       URL.revokeObjectURL(url);
     }
 
-    // 下载 ZIP：index.json + images/<hash>.png
     function downloadZip(data, imageBytesMap) {
       var pretty = document.getElementById("prettyPrint").checked;
       var baseName = (data.meta && data.meta.nodeName || data.meta && data.meta.pageName || "figma-export") +
@@ -236,20 +285,19 @@
 
       var zip = new JSZip();
       var imgFolder = zip.folder("images");
-
-      // 写图片文件，JSON 里记录相对路径
       var images = {};
       for (var hash in imageBytesMap) {
         if (!imageBytesMap.hasOwnProperty(hash)) continue;
-        var fileName = hash + ".png";
+        var bytes = imageBytesMap[hash];
+        var ext = bytes[0] === 255 ? "jpg" : bytes[0] === 71 ? "gif" : bytes[0] === 82 ? "webp" : "png";
+        var fileName = hash.replace(/[^a-zA-Z0-9_-]/g, "_") + "." + ext;
         imgFolder.file(fileName, new Uint8Array(imageBytesMap[hash]));
         images[hash] = "images/" + fileName;
+        if (data.assets && data.assets[hash]) data.assets[hash].relativePath = images[hash];
       }
 
-      // 清理内部字段，写图片路径映射
       data.nodes.forEach(cleanHashes);
       data.images = images;
-
       var json = pretty ? JSON.stringify(data, null, 2) : JSON.stringify(data);
       zip.file("index.json", json);
 
@@ -266,17 +314,19 @@
     window.onmessage = function(event) {
       var msg = event.data.pluginMessage;
       if (!msg) return;
+      // Late replies from a cancelled/expired MCP request must not affect the next export.
+      if (msg.requestId && msg.requestId !== remoteRequestId) return;
 
       if (msg.type === "progress") {
         setStatus(msg.message, "info");
-        if (remoteRequestId) sendToAgent({ type: "progress", requestId: remoteRequestId, message: msg.message });
+        if (remoteRequestId) sendToMcp({ type: "progress", requestId: remoteRequestId, message: msg.message });
       }
 
       if (msg.type === "image") {
         imageBytesMap[msg.hash] = msg.bytes;
         setStatus("已接收图片资源 " + Object.keys(imageBytesMap).length + " 张...", "info");
         if (remoteRequestId) {
-          sendToAgent({ type: "image", requestId: remoteRequestId, hash: msg.hash, bytes: msg.bytes });
+          sendToMcp({ type: "image", requestId: remoteRequestId, hash: msg.hash, bytes: msg.bytes });
         }
       }
 
@@ -284,7 +334,7 @@
         setStatus(msg.message, "error");
         document.getElementById("exportBtn").disabled = false;
         if (remoteRequestId) {
-          sendToAgent({ type: "error", requestId: remoteRequestId, message: msg.message });
+          sendToMcp({ type: "error", requestId: remoteRequestId, message: msg.message });
           remoteRequestId = null;
         }
       }
@@ -296,24 +346,20 @@
         var nodeCount = (data.meta && data.meta.nodeCount) || 0;
 
         if (remoteRequestId) {
-          // 远程模式：通过 WebSocket 将数据发给 Agent
-          // 清理内部字段
           data.nodes.forEach(cleanHashes);
           delete data._imageHashes;
-
-          sendToAgent({
+          sendToMcp({
             type: "done",
             requestId: remoteRequestId,
             data: data,
             imageCount: imageCount
           });
-          setStatus("已发送至 Agent（" + nodeCount + " 个节点" + (imageCount > 0 ? "，" + imageCount + " 张图片" : ""） + "）", "success");
+          setStatus("已通过 MCP 返回（" + nodeCount + " 个节点" + (imageCount > 0 ? "，" + imageCount + " 张图片" : "") + "）", "success");
           document.getElementById("exportBtn").disabled = false;
           remoteRequestId = null;
           return;
         }
 
-        // 手动模式：直接下载
         if (includeImages && imageCount > 0) {
           setStatus("正在打包 " + imageCount + " 张图片...", "info");
           downloadZip(data, imageBytesMap).then(function() {
@@ -331,8 +377,11 @@
       }
     };
 
-    // 启动 Agent 自动连接
-    connectAgent();
+    document.getElementById("startMcpBtn").addEventListener("click", startMcp);
+    document.getElementById("stopMcpBtn").addEventListener("click", stopMcp);
+    document.getElementById("exportBtn").addEventListener("click", startExport);
+    document.getElementById("cancelBtn").addEventListener("click", cancel);
+    connectMcp();
   </script>
 </body>
 </html>

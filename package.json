@@ -1,0 +1,27 @@
+{
+  "name": "figma-json-exporter",
+  "version": "3.0.0",
+  "private": true,
+  "description": "Local Figma export MCP server, compiled from TypeScript",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "npm run typecheck && esbuild src/main.ts --bundle --platform=node --target=node22 --format=cjs --outfile=dist/mcp-server.js --external:bufferutil --external:utf-8-validate",
+    "start": "node dist/mcp-server.js",
+    "serve": "node dist/mcp-server.js --transport=http",
+    "test": "npm run build && node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "ws": "8.21.3",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.1",
+    "@types/ws": "8.18.1",
+    "esbuild": "0.28.2",
+    "typescript": "7.0.2"
+  }
+}

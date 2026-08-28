@@ -1,4 +1,4 @@
-// Figma JSON Exporter - 纯 ES5，兼容 Figma 插件沙箱
+// Figma JSON Exporter - Figma 插件沙箱导出逻辑
 
 figma.showUI(__html__, { width: 360, height: 280, title: "JSON Exporter" });
 
@@ -77,6 +77,82 @@ function readProp(node, prop, fallback) {
   }
 }
 
+// Prune invisible subtrees before serializing or collecting image resources.
+function shouldExportNode(node) {
+  return readProp(node, "visible", true) !== false && readProp(node, "opacity", 1) !== 0;
+}
+
+// A directly selected child can still be hidden by an ancestor outside selection.
+function isEffectivelyVisible(node) {
+  var current = node;
+  while (current) {
+    if (!shouldExportNode(current)) return false;
+    current = readProp(current, "parent", null);
+  }
+  return true;
+}
+
+function boundsFromRect(rect) {
+  return { x: rect.x, y: rect.y, width: rect.width, height: rect.height,
+    left: rect.x, top: rect.y, right: rect.x + rect.width, bottom: rect.y + rect.height };
+}
+
+function absoluteBoundsOf(node) {
+  var rect = readProp(node, "absoluteBoundingBox", null);
+  if (rect) return boundsFromRect(rect);
+  var t = readProp(node, "absoluteTransform", null);
+  var w = readProp(node, "width", 0), h = readProp(node, "height", 0);
+  if (t) {
+    var points = [[0, 0], [w, 0], [0, h], [w, h]];
+    var xs = [], ys = [];
+    for (var i = 0; i < points.length; i++) {
+      xs.push(t[0][0] * points[i][0] + t[0][1] * points[i][1] + t[0][2]);
+      ys.push(t[1][0] * points[i][0] + t[1][1] * points[i][1] + t[1][2]);
+    }
+    var left = Math.min.apply(null, xs), top = Math.min.apply(null, ys);
+    return boundsFromRect({ x: left, y: top, width: Math.max.apply(null, xs) - left, height: Math.max.apply(null, ys) - top });
+  }
+  // Used only for minimal mock nodes; real SceneNodes expose absoluteTransform.
+  var x = readProp(node, "x", 0), y = readProp(node, "y", 0);
+  var parent = readProp(node, "parent", null);
+  while (parent) { x += readProp(parent, "x", 0); y += readProp(parent, "y", 0); parent = readProp(parent, "parent", null); }
+  return boundsFromRect({ x: x, y: y, width: w, height: h });
+}
+
+function addRelativeBounds(node, root, parent) {
+  var rect = node.absoluteBounds;
+  node.rootId = root.id;
+  node.parentId = parent ? parent.id : null;
+  node.relativeBounds = boundsFromRect({ x: rect.x - root.absoluteBounds.x, y: rect.y - root.absoluteBounds.y, width: rect.width, height: rect.height });
+  var origin = parent ? parent.absoluteBounds : root.absoluteBounds;
+  node.localBounds = boundsFromRect({ x: rect.x - origin.x, y: rect.y - origin.y, width: rect.width, height: rect.height });
+  if (node.children) for (var i = 0; i < node.children.length; i++) addRelativeBounds(node.children[i], root, node);
+}
+
+function isPureShape(node) {
+  var type = readProp(node, "type", "");
+  if (["VECTOR", "BOOLEAN_OPERATION", "RECTANGLE", "ELLIPSE", "LINE", "POLYGON", "STAR"].indexOf(type) !== -1) return true;
+  if (type !== "GROUP") return false;
+  var children = readProp(node, "children", []), count = 0;
+  for (var i = 0; i < children.length; i++) {
+    if (!shouldExportNode(children[i])) continue;
+    if (!isPureShape(children[i])) return false;
+    count++;
+  }
+  return count > 0;
+}
+
+function visibleDescendantIds(node) {
+  var ids = [];
+  var children = readProp(node, "children", []);
+  for (var i = 0; i < children.length; i++) {
+    if (!shouldExportNode(children[i])) continue;
+    ids.push(children[i].id);
+    ids = ids.concat(visibleDescendantIds(children[i]));
+  }
+  return ids;
+}
+
 function isMixed(value) {
   return value === figma.mixed || value === "Symbol(mixed)";
 }
@@ -133,12 +209,14 @@ function serializePaintList(node, prop) {
 
 function collectImageHashesFromNode(node) {
   var hashes = [];
-  var fills = readProp(node, "fills", null);
-  if (!fills || isMixed(fills)) return hashes;
-
-  for (var i = 0; i < fills.length; i++) {
-    var fill = fills[i];
-    if (fill.type === "IMAGE" && fill.imageHash) hashes.push(fill.imageHash);
+  var props = ["fills", "strokes"];
+  for (var p = 0; p < props.length; p++) {
+    var fills = readProp(node, props[p], null);
+    if (!fills || isMixed(fills)) continue;
+    for (var i = 0; i < fills.length; i++) {
+      var fill = fills[i];
+      if (fill.type === "IMAGE" && fill.imageHash && fill.visible !== false && fill.opacity !== 0) hashes.push(fill.imageHash);
+    }
   }
   return hashes;
 }
@@ -151,10 +229,16 @@ function serializeNodeBase(node) {
     visible: readProp(node, "visible", true)
   };
 
-  if (hasProp(node, "x")) base.x = Math.round(readProp(node, "x", 0));
-  if (hasProp(node, "y")) base.y = Math.round(readProp(node, "y", 0));
-  if (hasProp(node, "width")) base.width = Math.round(readProp(node, "width", 0));
-  if (hasProp(node, "height")) base.height = Math.round(readProp(node, "height", 0));
+  if (hasProp(node, "x")) base.x = readProp(node, "x", 0);
+  if (hasProp(node, "y")) base.y = readProp(node, "y", 0);
+  if (hasProp(node, "width")) base.width = readProp(node, "width", 0);
+  if (hasProp(node, "height")) base.height = readProp(node, "height", 0);
+  base.absoluteBounds = absoluteBoundsOf(node);
+  base.absoluteTransform = readProp(node, "absoluteTransform", null);
+  base.relativeTransform = readProp(node, "relativeTransform", null);
+  base.renderBounds = readProp(node, "absoluteRenderBounds", null);
+  base.clipsContent = readProp(node, "clipsContent", false);
+  base.isMask = readProp(node, "isMask", false);
   if (hasProp(node, "rotation")) base.rotation = readProp(node, "rotation", 0);
   if (hasProp(node, "opacity")) base.opacity = readProp(node, "opacity", 1);
   if (hasProp(node, "blendMode")) base.blendMode = readProp(node, "blendMode", "PASS_THROUGH");
@@ -190,6 +274,7 @@ function serializeNodeBase(node) {
   if (base.type === "TEXT") {
     base.characters = readProp(node, "characters", "");
     base.fontSize = serializeMixedValue(readProp(node, "fontSize", "mixed"));
+    base.fontWeight = serializeMixedValue(readProp(node, "fontWeight", 400));
     base.fontName = serializeFontName(readProp(node, "fontName", null));
     base.textAlignHorizontal = readProp(node, "textAlignHorizontal", "LEFT");
     base.textAlignVertical = readProp(node, "textAlignVertical", "TOP");
@@ -221,8 +306,19 @@ function serializeNodeBase(node) {
 }
 
 // 异步序列化节点（处理 mainComponent 等需要异步访问的属性）
-async function serializeNodeAsync(node) {
+async function serializeNodeAsync(node, context) {
+  if (!shouldExportNode(node)) return null;
   var base = serializeNodeBase(node);
+
+  if (context && context.shapeGroupsAsImages &&
+      (base.type === "VECTOR" || base.type === "BOOLEAN_OPERATION" || (base.type === "GROUP" && isPureShape(node)))) {
+    base.renderAs = "image";
+    base.assetId = "node-" + base.id;
+    base.collapsedNodeIds = visibleDescendantIds(node);
+    delete base._imageHashes;
+    context.rasters.push({ id: base.assetId, node: node, bounds: base.absoluteBounds });
+    return base;
+  }
 
   // 异步获取 mainComponent
   if (base.type === "INSTANCE") {
@@ -241,7 +337,8 @@ async function serializeNodeAsync(node) {
   if (children) {
     base.children = [];
     for (var i = 0; i < children.length; i++) {
-      base.children.push(await serializeNodeAsync(children[i]));
+      var child = await serializeNodeAsync(children[i], context);
+      if (child) base.children.push(child);
     }
   }
 
@@ -250,6 +347,7 @@ async function serializeNodeAsync(node) {
 
 // 同步版本保留（用于不需要异步访问的场景）
 function serializeNode(node) {
+  if (!shouldExportNode(node)) return null;
   var base = serializeNodeBase(node);
 
   if (base.type === "INSTANCE") {
@@ -261,7 +359,8 @@ function serializeNode(node) {
   if (children) {
     base.children = [];
     for (var i = 0; i < children.length; i++) {
-      base.children.push(serializeNode(children[i]));
+      var child = serializeNode(children[i]);
+      if (child) base.children.push(child);
     }
   }
 
@@ -291,101 +390,66 @@ function wrapMsg(base, requestId) {
   return base;
 }
 
+// One export at a time, including manual and MCP requests.
+var exportInProgress = false;
 figma.ui.onmessage = async function(msg) {
   var rid = msg.requestId;
-
-  if (msg.type === "export") {
-    try {
-      var selection = figma.currentPage.selection;
-      if (selection.length === 0) {
-        figma.ui.postMessage(wrapMsg({ type: "error", message: "请先选中至少一个节点" }, rid));
-        return;
-      }
-
-      figma.ui.postMessage(wrapMsg({ type: "progress", message: "正在序列化节点..." }, rid));
-
-      var nodes = [];
-      var nodeNames = [];
-      for (var i = 0; i < selection.length; i++) {
-        nodes.push(await serializeNodeAsync(selection[i]));
-        nodeNames.push(readProp(selection[i], "name", "node"));
-      }
-
-      var exportData = {
-        meta: {
-          exportedAt: new Date().toISOString(),
-          nodeName: nodeNames.join("+"),
-          nodeCount: selection.length
-        },
-        nodes: nodes,
-        images: {}
-      };
-
-      // 收集所有图片哈希
-      var allHashes = {};
-      for (var i = 0; i < nodes.length; i++) {
-        var hs = collectImageHashes(nodes[i]);
-        for (var j = 0; j < hs.length; j++) allHashes[hs[j]] = true;
-      }
-      var hashList = Object.keys(allHashes);
-
-      if (hashList.length === 0) {
-        var cleanData0 = JSON.parse(JSON.stringify(exportData));
-        figma.ui.postMessage(wrapMsg({ type: "done", data: cleanData0 }, rid));
-        return;
-      }
-
-      figma.ui.postMessage(wrapMsg({ type: "progress", message: "导出图片资源 (" + hashList.length + " 张)..." }, rid));
-
-      // 并行导出所有图片，bytes 直接传给 UI 侧做 base64 转换
-      // （避免 ES5 var 闭包 bug 和插件沙箱 btoa 大文件限制）
-      var promises = [];
-      for (var i = 0; i < hashList.length; i++) {
-        (function(hash) {
-          var image = figma.getImageByHash(hash);
-          if (!image) return;
-          var p = image.getBytesAsync().then(function(bytes) {
-            return { hash: hash, bytes: Array.from(bytes) };
-          }).catch(function() {
-            return null;
-          });
-          promises.push(p);
-        })(hashList[i]);
-      }
-
-      Promise.all(promises).then(function(results) {
-        var imageCount = 0;
-        var cleanData = JSON.parse(JSON.stringify(exportData));
-        var pending = results.length;
-
-        if (pending === 0) {
-          figma.ui.postMessage(wrapMsg({ type: "done", data: cleanData, imageCount: 0 }, rid));
-          return;
-        }
-
-        for (var i = 0; i < results.length; i++) {
-          (function(result) {
-            if (!result) {
-              pending--;
-              if (pending === 0) figma.ui.postMessage(wrapMsg({ type: "done", data: cleanData, imageCount: imageCount }, rid));
-              return;
-            }
-
-            imageCount++;
-            figma.ui.postMessage(wrapMsg({ type: "image", hash: result.hash, bytes: result.bytes }, rid));
-            pending--;
-            if (pending === 0) figma.ui.postMessage(wrapMsg({ type: "done", data: cleanData, imageCount: imageCount }, rid));
-          })(results[i]);
-        }
-      }).catch(function(e) {
-        figma.ui.postMessage(wrapMsg({ type: "error", message: "导出图片失败：" + (e && e.message ? e.message : e) }, rid));
-      });
-    } catch (e) {
-      figma.ui.postMessage(wrapMsg({ type: "error", message: "导出失败：" + (e && e.message ? e.message : e) }, rid));
-    }
+  if (msg.type === "cancel") { figma.closePlugin(); return; }
+  if (msg.type !== "export") return;
+  if (exportInProgress) {
+    figma.ui.postMessage(wrapMsg({ type: "error", message: "已有导出正在执行，请等待完成后重试" }, rid));
+    return;
   }
-
-  if (msg.type === "cancel") {
-    figma.closePlugin();
+  exportInProgress = true;
+  try {
+    var selection = figma.currentPage.selection;
+    if (selection.length === 0) throw new Error("请先选中至少一个节点");
+    var context = { shapeGroupsAsImages: msg.shapeGroupsAsImages !== false, rasters: [] };
+    var nodes = [], names = [];
+    figma.ui.postMessage(wrapMsg({ type: "progress", message: "正在读取精确图层边界..." }, rid));
+    for (var i = 0; i < selection.length; i++) {
+      if (!isEffectivelyVisible(selection[i])) continue;
+      // Do not export the same subtree twice if both ancestor and child are selected.
+      var ancestor = readProp(selection[i], "parent", null), nested = false;
+      while (ancestor) {
+        if (selection.indexOf(ancestor) !== -1) { nested = true; break; }
+        ancestor = readProp(ancestor, "parent", null);
+      }
+      if (nested) continue;
+      var n = await serializeNodeAsync(selection[i], context);
+      if (n) { nodes.push(n); names.push(n.name); addRelativeBounds(n, n, null); }
+    }
+    if (!nodes.length) throw new Error("选中的节点均已隐藏或透明度为 0，没有可导出的可见节点");
+    var data = { meta: { schemaVersion: 3, exportedAt: new Date().toISOString(), nodeName: names.join("+"), nodeCount: nodes.length }, nodes: nodes, images: {}, assets: {} };
+    var hashes = {};
+    for (var i = 0; i < nodes.length; i++) {
+      var collected = collectImageHashes(nodes[i]);
+      for (var j = 0; j < collected.length; j++) hashes[collected[j]] = true;
+    }
+    var keys = Object.keys(hashes), imageCount = 0;
+    figma.ui.postMessage(wrapMsg({ type: "progress", message: "正在导出图片与组合形状..." }, rid));
+    for (var i = 0; i < keys.length; i++) {
+      var hash = keys[i], image = figma.getImageByHash(hash);
+      if (!image) throw new Error("找不到图片资源：" + hash);
+      var bytes = await image.getBytesAsync();
+      data.assets[hash] = { id: hash, kind: "image-fill" };
+      figma.ui.postMessage(wrapMsg({ type: "image", hash: hash, bytes: Array.from(bytes) }, rid));
+      imageCount++;
+    }
+    for (var i = 0; i < context.rasters.length; i++) {
+      var item = context.rasters[i];
+      var bytes = await item.node.exportAsync({ format: "PNG", constraint: { type: "SCALE", value: 2 }, contentsOnly: true, useAbsoluteBounds: true });
+      data.assets[item.id] = { id: item.id, kind: "shape", nodeId: item.node.id, scale: 2, bounds: item.bounds, opacityBaked: true };
+      figma.ui.postMessage(wrapMsg({ type: "image", hash: item.id, bytes: Array.from(bytes) }, rid));
+      imageCount++;
+    }
+    // Strip internal image bookkeeping, retaining only public metadata and geometry.
+    function clean(n) { delete n._imageHashes; if (n.children) n.children.forEach(clean); }
+    nodes.forEach(clean);
+    figma.ui.postMessage(wrapMsg({ type: "done", data: JSON.parse(JSON.stringify(data)), imageCount: imageCount }, rid));
+  } catch (error) {
+    figma.ui.postMessage(wrapMsg({ type: "error", message: "导出失败：" + (error && error.message ? error.message : error) }, rid));
+  } finally {
+    exportInProgress = false;
   }
 };

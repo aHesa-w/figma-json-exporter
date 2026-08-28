@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "figma-json-exporter": {
+      "description": "Figma JSON Exporter stdio proxy",
+      "command": "node",
+      "args": ["/Users/wangzihan11/code/self/figma-json-exporter/dist/mcp-server.js"],
+      "env": {
+        "FIGMA_MCP_BRIDGE_URL": "http://127.0.0.1:3456"
+      }
+    }
+  }
+}
