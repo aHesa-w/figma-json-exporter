@@ -9,7 +9,7 @@ import type { ActualLayout } from "./geometry.js";
 
 export function createMCPServer(exporter: Exporter): McpServer {
   const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION }, {
-    instructions: "Export visible Figma layers and local image assets first. Implement every exported layer using data-d2c-id matching its Figma ID; mark selection roots with data-d2c-root. Composite image nodes are atomic leaves. Preserve exact target geometry. Wait for fonts/images, run the exported DOM collector, then call figma_validate_layout. Fix parent layout errors first and repeat real browser measurement until passed=true. Never fabricate measurements or alter target bounds to pass. If blocked or not converging, report failed checks; geometry success does not prove visual/interaction fidelity.",
+    instructions: "Export visible Figma layers and local image assets first. Implement every exported layer using data-d2c-id matching its Figma ID; mark selection roots with data-d2c-root. Any renderAs=image node (including TEXT and image-filled leaves) must use its local asset as an IMG, with original asset filename retained; do not render its text or effects again. Use lineHeight.css, preserving PERCENT as % and AUTO as normal; never append px to a percent value. Non-raster image paints must render via assets[imageHash], not empty containers. Preserve exact target geometry. Wait for fonts/images, run the NEW exported DOM collector, then call figma_validate_layout. It also checks image references and explicit line-height. Fix parent layout errors first and repeat real browser measurement until passed=true. Never fabricate measurements or alter target bounds to pass. If blocked or not converging, report failed checks; geometry success does not prove visual/interaction fidelity.",
   });
   const result = async (operation: () => Promise<unknown>): Promise<CallToolResult> => {
     try {
@@ -40,7 +40,7 @@ export function createMCPServer(exporter: Exporter): McpServer {
         coordinateSpace: z.literal("root-relative"), stable: z.boolean(), fontsReady: z.boolean(),
         brokenImages: z.array(z.string()).optional(),
         viewport: z.object({ width: z.number(), height: z.number(), devicePixelRatio: z.number() }).optional(),
-        nodes: z.array(z.object({ id: z.string(), rootId: z.string().nullable(), parentId: z.string().nullable(), visible: z.boolean(), bounds: z.object({ x: z.number(), y: z.number(), width: z.number().nonnegative(), height: z.number().nonnegative() }) })),
+        nodes: z.array(z.object({ id: z.string(), rootId: z.string().nullable(), parentId: z.string().nullable(), visible: z.boolean(), tagName: z.string().optional(), imageSources: z.array(z.string()).optional(), textStyle: z.object({ fontSize: z.number().nullable(), lineHeight: z.number().nullable() }).optional(), bounds: z.object({ x: z.number(), y: z.number(), width: z.number().nonnegative(), height: z.number().nonnegative() }) })),
       }).optional().describe("Collector result; supply either actual or actualPath"),
       tolerance: z.number().min(0).max(10).optional().describe("CSS pixels, default 1; never raise tolerance merely to conceal errors"),
     },

@@ -25,6 +25,7 @@ function serializePaint(paint) {
     return base;
   }
   if (type.indexOf("GRADIENT") !== -1) {
+    base.gradientTransform = paint.gradientTransform;
     var stops = [];
     if (paint.gradientStops) {
       for (var i = 0; i < paint.gradientStops.length; i++) {
@@ -38,6 +39,10 @@ function serializePaint(paint) {
   if (type === "IMAGE") {
     base.imageHash = paint.imageHash;
     base.scaleMode = paint.scaleMode;
+    base.imageTransform = paint.imageTransform;
+    base.scalingFactor = paint.scalingFactor;
+    base.rotation = paint.rotation;
+    base.filters = paint.filters;
     return base;
   }
   return base;
@@ -169,12 +174,35 @@ function serializeFontName(fontName) {
   };
 }
 
-function serializeLineHeight(lineHeight) {
+function serializeLineHeight(lineHeight, fontSize) {
   if (!lineHeight || isMixed(lineHeight)) return "mixed";
+  var unit = readProp(lineHeight, "unit", "AUTO");
+  var value = readProp(lineHeight, "value", null);
   return {
-    unit: readProp(lineHeight, "unit", "AUTO"),
-    value: readProp(lineHeight, "value", null)
+    unit: unit, value: value,
+    css: unit === "AUTO" ? "normal" : unit === "PERCENT" ? value + "%" : unit === "PIXELS" ? value + "px" : null,
+    pixels: unit === "PIXELS" ? value : unit === "PERCENT" && typeof fontSize === "number" ? fontSize * value / 100 : null
   };
+}
+
+// Explicit portable/system-font policy, not a vendor-name blacklist. A local
+// browser font inventory is not available in the Figma sandbox.
+var SYSTEM_FONT_FAMILIES = ["arial", "arial black", "helvetica", "helvetica neue", "times new roman", "times", "georgia", "verdana", "tahoma", "trebuchet ms", "courier new", "courier", "segoe ui", "sf pro", "sf pro display", "sf pro text", "pingfang sc", "pingfang tc", "pingfang hk", "microsoft yahei", "microsoft jhenghei", "simsun", "simhei", "songti sc", "heiti sc", "hiragino sans", "hiragino sans gb", "sans-serif", "serif", "monospace", "system-ui", "-apple-system", "blinkmacsystemfont"];
+function textRasterReason(node, base) {
+  if (base.type !== "TEXT") return null;
+  if (readProp(node, "hasMissingFont", false)) return "missing-font";
+  var fonts = [];
+  if (base.fontName !== "mixed") fonts = [base.fontName];
+  else {
+    try { fonts = node.getRangeAllFontNames(0, base.characters.length); } catch (e) { return "unknown-font"; }
+  }
+  if (!fonts.length) return "unknown-font";
+  for (var i = 0; i < fonts.length; i++) {
+    var family = String(fonts[i].family || "").trim().toLowerCase();
+    if (SYSTEM_FONT_FAMILIES.indexOf(family) === -1) return "non-system-font";
+  }
+  if (base.fontName === "mixed" || base.fontSize === "mixed" || base.lineHeight === "mixed") return "mixed-text-style";
+  return null;
 }
 
 function serializeLetterSpacing(letterSpacing) {
@@ -278,7 +306,7 @@ function serializeNodeBase(node) {
     base.fontName = serializeFontName(readProp(node, "fontName", null));
     base.textAlignHorizontal = readProp(node, "textAlignHorizontal", "LEFT");
     base.textAlignVertical = readProp(node, "textAlignVertical", "TOP");
-    base.lineHeight = serializeLineHeight(readProp(node, "lineHeight", null));
+    base.lineHeight = serializeLineHeight(readProp(node, "lineHeight", null), base.fontSize);
     base.letterSpacing = serializeLetterSpacing(readProp(node, "letterSpacing", null));
     base.textDecoration = serializeMixedValue(readProp(node, "textDecoration", "mixed"));
   }
@@ -310,13 +338,19 @@ async function serializeNodeAsync(node, context) {
   if (!shouldExportNode(node)) return null;
   var base = serializeNodeBase(node);
 
-  if (context && context.shapeGroupsAsImages &&
-      (base.type === "VECTOR" || base.type === "BOOLEAN_OPERATION" || (base.type === "GROUP" && isPureShape(node)))) {
+  var rasterReason = textRasterReason(node, base);
+  var visibleChildren = readProp(node, "children", []).filter(shouldExportNode);
+  var imageLeaf = collectImageHashesFromNode(node).length > 0 && visibleChildren.length === 0;
+  var shape = context && context.shapeGroupsAsImages &&
+      (base.type === "VECTOR" || base.type === "BOOLEAN_OPERATION" || (base.type === "GROUP" && isPureShape(node)));
+  if (context && (rasterReason || imageLeaf || shape)) {
     base.renderAs = "image";
     base.assetId = "node-" + base.id;
+    base.rasterReason = rasterReason || (imageLeaf ? "image-paint" : "composite-shape");
     base.collapsedNodeIds = visibleDescendantIds(node);
-    delete base._imageHashes;
-    context.rasters.push({ id: base.assetId, node: node, bounds: base.absoluteBounds });
+    // Retain original image bytes as well as the faithful cropped/filtered PNG.
+    if (!imageLeaf) delete base._imageHashes;
+    context.rasters.push({ id: base.assetId, node: node, bounds: base.absoluteBounds, kind: base.type === "TEXT" ? "text" : imageLeaf ? "image-render" : "shape", reason: base.rasterReason });
     return base;
   }
 
@@ -420,7 +454,7 @@ figma.ui.onmessage = async function(msg) {
       if (n) { nodes.push(n); names.push(n.name); addRelativeBounds(n, n, null); }
     }
     if (!nodes.length) throw new Error("选中的节点均已隐藏或透明度为 0，没有可导出的可见节点");
-    var data = { meta: { schemaVersion: 3, exportedAt: new Date().toISOString(), nodeName: names.join("+"), nodeCount: nodes.length }, nodes: nodes, images: {}, assets: {} };
+    var data = { meta: { schemaVersion: 3, exporterVersion: "3.1.0", exportedAt: new Date().toISOString(), nodeName: names.join("+"), nodeCount: nodes.length }, nodes: nodes, images: {}, assets: {} };
     var hashes = {};
     for (var i = 0; i < nodes.length; i++) {
       var collected = collectImageHashes(nodes[i]);
@@ -439,7 +473,7 @@ figma.ui.onmessage = async function(msg) {
     for (var i = 0; i < context.rasters.length; i++) {
       var item = context.rasters[i];
       var bytes = await item.node.exportAsync({ format: "PNG", constraint: { type: "SCALE", value: 2 }, contentsOnly: true, useAbsoluteBounds: true });
-      data.assets[item.id] = { id: item.id, kind: "shape", nodeId: item.node.id, scale: 2, bounds: item.bounds, opacityBaked: true };
+      data.assets[item.id] = { id: item.id, kind: item.kind, rasterReason: item.reason, nodeId: item.node.id, scale: 2, bounds: item.bounds, opacityBaked: true };
       figma.ui.postMessage(wrapMsg({ type: "image", hash: item.id, bytes: Array.from(bytes) }, rid));
       imageCount++;
     }

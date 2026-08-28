@@ -71,7 +71,7 @@ node dist/mcp-server.js --transport=http
 
 过滤不修改设计稿。这是按节点属性过滤，不做像素可见性判断，不会推测遮挡、裁剪或屏幕外节点是否应被删除。
 
-## v3：图片先落盘，JSON 后返回
+## v3.1：图片先落盘，JSON 后返回
 
 调用 `figma_export`，可传入 `outputDir`（绝对路径）和 `shapeGroupsAsImages`（默认 `true`）。每次导出新建一个目录，不覆盖已有文件：
 
@@ -87,6 +87,7 @@ export-<uuid>/
 节点树还保留填充、描边、效果、圆角、文本、字体、Auto Layout、约束和组件引用。图片字节从 Figma 插件传至本机服务，所有文件写完后才发布目录并返回结果。缺图、读取失败、未知图片格式或写入失败都会使导出失败，不能返回假路径。支持 PNG/JPEG/GIF/WebP 原图；单张图片字节上限 32MB，单次累计 128MB，导出超时 120 秒。
 
 - `meta.schemaVersion = 3`；`meta.designPath`、`meta.layoutPath` 等为本机绝对路径。
+- `meta.exporterVersion = "3.1.0"` 标识新版插件已加载；升级后应关闭并重新打开 Figma 插件。服务会拒绝旧插件的导出，避免静默漏掉新增的字体/图片处理；旧版 v3 JSON 仍可用于校验诊断。
 - `assets[assetId]` 含 `path`、`relativePath`、`mimeType`、`byteLength`、`sha256`。
 - 普通图片填充的 `imageHash` 对应 `assets[imageHash]`；形状图片节点通过 `assetId` 引用资源。
 - 手动导出可选择 ZIP，包含 `index.json` 和 `images/`，ZIP 中使用相对路径。UI 打包 ZIP 仍引用 cdnjs 上的 JSZip；MCP 不依赖该 CDN。
@@ -98,6 +99,29 @@ export-<uuid>/
 这些节点标记为 `renderAs: "image"`，有 `assetId` 和 `collapsedNodeIds`，不再带 `children`。实现时视为一个原子图层，校验它的整体边界，不再为合并的内部路径创建 DOM。PNG 已包含该节点的外观和透明度，不应再次应用同一节点的填充、旋转或透明度；外层容器的样式仍须保留。可用 `shapeGroupsAsImages: false` 关闭，手动导出也有对应选项。
 
 PNG 使用 Figma 的 `exportAsync`、`useAbsoluteBounds: true`，保留完整图层尺寸而非只裁到非透明像素。参见 [Figma ExportSettings](https://developers.figma.com/docs/plugins/api/ExportSettings/)。
+
+### 行高、特殊字体和图片填充
+
+文字行高保留 Figma 原始 `unit/value`，并提供可直接用于 CSS 的 `lineHeight.css` 及可计算时的 `lineHeight.pixels`：
+
+| 输入（字号 32） | `css` | `pixels` |
+| --- | --- | --- |
+| `PERCENT / 100` | `100%` | `32` |
+| `PERCENT / 125.5` | `125.5%` | `40.16` |
+| `PIXELS / 100` | `100px` | `100` |
+| `AUTO` | `normal` | `null` |
+
+不要直接给 `lineHeight.value` 拼接 `px`。`AUTO` 不伪造固定像素行高；混合样式无法安全用一套 CSS 表达时，保留原文并栅格化。
+
+字体使用明确的常见系统字体名单（例如 Arial、Helvetica、PingFang SC/TC/HK、Microsoft YaHei、Segoe UI），不按某个公司名称做特殊适配。名称先去除两端空格、忽略大小写。名单之外的字体、Figma 中缺失的字体及混合文字样式会自动导出为 PNG，标记 `renderAs: "image"`、`rasterReason`，资源类型为 `text`。`characters` 和原字体元数据仍保留，建议用原文作为图片 `alt`。
+
+这是一项保守策略，不保证名单中的字体在所有操作系统都已安装；Figma 沙箱无法读取目标浏览器的字体清单。栅格化不修改设计、不安装或替换字体，也不要求先加载缺失字体，使用 Figma 已保存的文字外观。[Figma 文字说明](https://developers.figma.com/docs/plugins/working-with-text/)
+
+**图片填充不是独立的 Figma IMAGE 节点**。v3.1 默认将具有可见图片填充/描边的叶节点导出为 `image-render` PNG，裁剪、滤镜、填充透明度及旋转由 Figma 渲染；同时保留原图 `image-fill`。它们和特殊字体独立于 `shapeGroupsAsImages` 开关，不能只处理 GROUP/VECTOR 后忽略这些图片。
+
+有子节点的图片容器仍保留布局层级，其 `fills/strokes` 中的 `imageHash` 必须映射到 `assets[imageHash]` 并绘制，不能生成空容器。导出保留 `imageTransform`、`scaleMode`、`scalingFactor`、`rotation`、`filters` 和渐变矩阵；不能将 CROP 当作任意居中 cover。[Figma Paint 定义](https://developers.figma.com/docs/plugins/api/Paint/)
+
+所有 `renderAs: "image"` 节点都应优先于 `type === "TEXT"` 等分支处理，并使用对应本地文件。不能在图片上再绘制原文、填充、效果或重复应用节点透明度。
 
 ## 图层坐标与验收流程
 
@@ -122,6 +146,14 @@ Agent 应按以下顺序执行：
 采集器只读取真实 `getBoundingClientRect()`，减去浏览器中根节点的矩形原点，因此页面居中、页面滚动不会直接造成整体偏差。多选根节点分别归一化；验证的是每个选区内部布局，不校验不同选区在页面之间的排布。**不要使用 CSS zoom/整体缩放来适配验收视口**，因为缩放后的矩形会改变尺寸。
 
 MCP 返回 `passed`、`maxError`、`failed`（父级优先，响应最多 30 项）、`failedCount`、`missing`、`duplicates`、`unexpected` 和 `reportPath`。完整报告包含实测数据和每个图层的预期值、实际值、六项差值。
+
+v3.1 还检查显式行高和图片引用：
+
+- 对非栅格化文字读取浏览器计算行高，与 PIXELS 或 `fontSize × PERCENT / 100` 比较，报告 `line-height-mismatch`。
+- 对图片节点检查实际 `IMG` 及资源文件名；对普通图片填充检查实际 CSS 背景引用，报告 `image-missing-or-wrong-source`。复制资源时保留导出的文件名，便于跨目录核对。当前引用校验针对文件 URL，不支持将图片改名或改为 data URI 后仍声称引用通过。
+- 必须运行新版采集器，它会返回 `tagName`、`imageSources`、`textStyle`。只有外框矩形、没有这些测量信息的旧采集结果不能通过相关检查。
+
+引用检查不是浏览器端内容哈希或像素校验：同名文件被替换、背景图片网络失败、遮挡等还需另行验证，不能将它当作完整视觉验收。
 
 **边界：**服务负责导出和数值比较，浏览器执行及 HTML/CSS 修正由 Agent 完成；单独调用导出并不会自动修复页面。MCP 指令会要求反复实测直到通过，但不能强制所有 Agent 执行。不能从设计值伪造实测值、修改目标或放宽阈值来通过。浏览器不可用或修正无法收敛时应明确报告未验收，不得宣称完成。几何通过也不代表像素、字体、遮挡、裁剪或交互一致，需要另行检查。
 

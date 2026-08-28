@@ -24,7 +24,7 @@ test("manual and MCP exports prune invisible roots/subtrees and their images", a
     assert.deepEqual(result.data.nodes[0].children.map((n) => n.id), ["visible-image", "empty-fill-container"]);
     assert.equal(result.data.nodes[0].children[1].children[0].characters, "Keep me");
     assert.deepEqual(fixture.imageReads, ["visible"]);
-    assert.equal(result.imageCount, 1);
+    assert.equal(result.imageCount, 2); // original image plus its cropped/rendered leaf
   }
 });
 
@@ -111,4 +111,49 @@ test("raster failures do not silently return an incomplete successful export", a
   const result = await pluginFixture([node("bad", { type: "VECTOR", async exportAsync() { throw new Error("raster unavailable"); } })]).request();
   assert.equal(result.type, "error");
   assert.match(result.message, /raster unavailable/);
+});
+
+test("line-height retains percent/pixel/AUTO units and emits ready-to-use CSS", async () => {
+  const inputs = [{ unit: "PERCENT", value: 100 }, { unit: "PERCENT", value: 125.5 }, { unit: "PIXELS", value: 100 }, { unit: "AUTO" }];
+  const result = await pluginFixture(inputs.map((lineHeight, i) => node(String(i), { type: "TEXT", fontSize: 32, lineHeight }))).request();
+  assert.deepEqual(result.data.nodes.map(n => n.lineHeight.css), ["100%", "125.5%", "100px", "normal"]);
+  assert.deepEqual(result.data.nodes.map(n => n.lineHeight.pixels), [32, 40.16, 100, null]);
+  assert.equal(result.imageCount, 0);
+});
+
+test("non-system, missing and mixed fonts rasterize without a vendor-specific blacklist", async () => {
+  const result = await pluginFixture([
+    node("system", { type: "TEXT", fontName: { family: " PingFang SC ", style: "Regular" } }),
+    ...["Baidu Number Plus ", "Douyin Sans", "MF YuanHei(Noncommercial)", "Unknown Future Font"].map(family => node(family, { type: "TEXT", characters: "保留原文", fontName: { family, style: "Regular" } })),
+    node("missing", { type: "TEXT", hasMissingFont: true }),
+    node("mixed", { type: "TEXT", characters: "ab", fontName: "Symbol(mixed)", getRangeAllFontNames() { return [{ family: "Arial", style: "Regular" }, { family: "Unknown", style: "Regular" }]; } }),
+  ]).request();
+  assert.equal(result.type, "done");
+  assert.equal(result.data.nodes[0].renderAs, undefined);
+  assert.equal(result.imageCount, 6);
+  for (const n of result.data.nodes.slice(1)) {
+    assert.equal(n.renderAs, "image");
+    assert.equal(result.data.assets[n.assetId].kind, "text");
+  }
+  assert.equal(result.data.nodes[1].characters, "保留原文");
+  assert.equal(result.data.nodes[5].rasterReason, "missing-font");
+});
+
+test("image paint leaves export both original bytes and rendered crop; containers retain children", async () => {
+  const paint = { type: "IMAGE", imageHash: "photo", scaleMode: "CROP", imageTransform: [[2, 0, -.1], [0, 2, -.2]], filters: { exposure: .5 } };
+  const result = await pluginFixture([
+    node("leaf", { fills: [paint] }),
+    node("container", { fills: [paint], children: [node("text", { type: "TEXT" })] }),
+    node("hidden-paint", { fills: [{ ...paint, visible: false }] }),
+  ]).request("images", { shapeGroupsAsImages: false });
+  assert.equal(result.type, "done");
+  const [leaf, container, hidden] = result.data.nodes;
+  assert.equal(leaf.renderAs, "image");
+  assert.deepEqual(leaf.fills[0].imageTransform, paint.imageTransform);
+  assert.deepEqual(leaf.fills[0].filters, paint.filters);
+  assert.equal(result.data.assets[leaf.assetId].kind, "image-render");
+  assert.equal(result.data.assets.photo.kind, "image-fill");
+  assert.equal(container.renderAs, undefined);
+  assert.equal(container.children.length, 1);
+  assert.equal(hidden.renderAs, undefined);
 });

@@ -6,6 +6,7 @@ const code = readFileSync(new URL("../code.js", import.meta.url), "utf8");
 export const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==", "base64");
 export function node(id, properties = {}) {
   return { id, name: id, type: "FRAME", visible: true, opacity: 1, x: 0, y: 0, width: 100, height: 100,
+    ...(properties.type === "TEXT" ? { fontName: { family: "Arial", style: "Regular" }, fontSize: 16, lineHeight: { unit: "AUTO" } } : {}),
     async exportAsync() { return new Uint8Array(PNG); }, ...properties };
 }
 

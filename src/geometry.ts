@@ -63,6 +63,9 @@ export interface ActualLayer {
   id: string; rootId: string | null; parentId: string | null;
   bounds: { x: number; y: number; width: number; height: number };
   visible: boolean;
+  tagName?: string;
+  imageSources?: string[];
+  textStyle?: { fontSize: number | null; lineHeight: number | null };
 }
 export interface ActualLayout {
   coordinateSpace: "root-relative";
@@ -98,22 +101,40 @@ export function validateLayout(designInput: unknown, actual: ActualLayout, toler
     const delta = Object.fromEntries(fields.map((field) => [field, bounds[field] - node.relativeBounds[field]]));
     const maxError = Math.max(...Object.values(delta).map(Math.abs));
     const hierarchyMatches = found.rootId === node.rootId && found.parentId === node.parentId;
+    const assetIds = node.assetId ? [node.assetId] : ["fills", "strokes"].flatMap((property) => {
+      const paints = node[property];
+      return Array.isArray(paints) ? paints.filter((p) => p.type === "IMAGE" && p.visible !== false && p.opacity !== 0 && p.imageHash).map((p) => p.imageHash as string) : [];
+    });
+    const missingAssets = assetIds.filter((id) => {
+      const asset = design.assets[id];
+      const filename = String(asset?.relativePath ?? asset?.path ?? "").split("/").pop();
+      return !filename || !(found.imageSources ?? []).some((src) => {
+        try { return decodeURIComponent(new URL(src, "http://local.invalid/").pathname).split("/").pop() === filename; } catch { return false; }
+      });
+    });
+    const imageMatches = !missingAssets.length && (!node.assetId || found.tagName === "IMG");
+    const lineHeight = node.lineHeight as { unit?: string; value?: number; pixels?: number | null } | undefined;
+    const expectedLineHeight = lineHeight?.unit === "PIXELS" ? lineHeight.value : lineHeight?.unit === "PERCENT" && typeof node.fontSize === "number" ? node.fontSize * lineHeight.value! / 100 : null;
+    const checkLineHeight = node.type === "TEXT" && node.renderAs !== "image" && typeof expectedLineHeight === "number" && Number.isFinite(expectedLineHeight);
+    const actualLineHeight = found.textStyle?.lineHeight;
+    const lineHeightMatches = !checkLineHeight || (typeof actualLineHeight === "number" && Math.abs(actualLineHeight - expectedLineHeight!) <= tolerance);
     return {
       id: node.id, name: node.name, depth: node.depth, parentId: node.parentId,
-      passed: maxError <= tolerance && hierarchyMatches && found.visible === true && !duplicates.includes(node.id),
-      reason: duplicates.includes(node.id) ? "duplicate-id" : !found.visible ? "hidden-in-implementation" : !hierarchyMatches ? "hierarchy-mismatch" : maxError > tolerance ? "geometry-mismatch" : "matched",
+      passed: maxError <= tolerance && hierarchyMatches && imageMatches && lineHeightMatches && found.visible === true && !duplicates.includes(node.id),
+      reason: duplicates.includes(node.id) ? "duplicate-id" : !found.visible ? "hidden-in-implementation" : !hierarchyMatches ? "hierarchy-mismatch" : !imageMatches ? "image-missing-or-wrong-source" : !lineHeightMatches ? "line-height-mismatch" : maxError > tolerance ? "geometry-mismatch" : "matched",
       expected: node.relativeBounds, actual: bounds, delta, maxError,
+      missingAssets, ...(checkLineHeight ? { expectedLineHeight, actualLineHeight: actualLineHeight ?? null } : {}),
     };
   });
   const failed = layers.filter((n) => !n.passed).sort((a, b) => a.depth - b.depth);
   const environmentReady = actual.stable === true && actual.fontsReady === true && !(actual.brokenImages?.length);
   return {
     passed: failed.length === 0 && duplicates.length === 0 && unexpected.length === 0 && environmentReady,
-    scope: "geometry-only; not a pixel, typography or interaction equivalence check",
+    scope: "geometry, image references and explicit line-height; not pixel, font-glyph or interaction equivalence",
     tolerance, total: layers.length, matched: layers.length - failed.length,
     missing, duplicates, unexpected, environmentReady,
     stable: actual.stable, fontsReady: actual.fontsReady, brokenImages: actual.brokenImages ?? [],
-    maxError: Math.max(0, ...layers.map((n) => n.maxError ?? 0)),
+    maxError: Math.max(0, ...layers.map((n) => "maxError" in n ? n.maxError : 0)),
     nextAction: failed.length ? "Fix parent layers first; preserve data-d2c-id; collect real DOM rectangles again and validate until passed. Do not edit target bounds or invent actual values." : !environmentReady ? "Wait for fonts, images and stable layout, then collect again" : unexpected.length || duplicates.length ? "Fix duplicate/unexpected IDs, then collect again" : "Geometry passed; perform visual and interaction review separately",
     failed, layers,
   };
@@ -128,6 +149,10 @@ export async function collectLayout(): Promise<ActualLayout> {
     return Array.from(document.querySelectorAll<HTMLElement>("[data-d2c-id]")).map((element) => {
       const root = element.closest<HTMLElement>("[data-d2c-root]");
       const box = element.getBoundingClientRect(), origin = root?.getBoundingClientRect();
+      const computed = getComputedStyle(element);
+      const imageSources: string[] = [];
+      if (element.tagName === "IMG") imageSources.push((element as unknown as HTMLImageElement).currentSrc || (element as unknown as HTMLImageElement).src);
+      for (const match of (computed.backgroundImage || "").matchAll(/url\(["']?([^"')]+)["']?\)/g)) imageSources.push(match[1]!);
       let visible = true;
       for (let current: HTMLElement | null = element; current; current = current.parentElement) {
         const style = getComputedStyle(current);
@@ -137,6 +162,8 @@ export async function collectLayout(): Promise<ActualLayout> {
         id: element.dataset.d2cId!, rootId: root?.dataset.d2cId ?? null,
         parentId: element === root ? null : element.parentElement?.closest<HTMLElement>("[data-d2c-id]")?.dataset.d2cId ?? null,
         bounds: { x: box.x - (origin?.x ?? 0), y: box.y - (origin?.y ?? 0), width: box.width, height: box.height }, visible,
+        tagName: element.tagName, imageSources,
+        textStyle: { fontSize: Number.parseFloat(computed.fontSize) || null, lineHeight: computed.lineHeight === "normal" ? null : Number.parseFloat(computed.lineHeight) || null },
       };
     });
   }

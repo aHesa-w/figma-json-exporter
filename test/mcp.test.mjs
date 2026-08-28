@@ -62,14 +62,14 @@ async function fixture(t) {
   return { base, entry, env, client, plugin };
 }
 
-const exportData = (id = "fixture") => ({ meta: { schemaVersion: 3 }, assets: {}, nodes: [{ id, name: id, type: "FRAME", absoluteBounds: { x: 10, y: 20, width: 100, height: 100 } }] });
+const exportData = (id = "fixture") => ({ meta: { schemaVersion: 3, exporterVersion: "3.1.0" }, assets: {}, nodes: [{ id, name: id, type: "FRAME", absoluteBounds: { x: 10, y: 20, width: 100, height: 100 } }] });
 const payload = (result) => JSON.parse(result.content[0].text);
 
 test("standalone compiled entry auto-starts shared service; stdio and HTTP expose MCP tools/errors", { timeout: 15000 }, async (t) => {
   const f = await fixture(t);
   const stdio = await f.client();
   const http = await f.client("http");
-  assert.equal((await (await fetch(f.base + "/health")).json()).version, "3.0.0");
+  assert.equal((await (await fetch(f.base + "/health")).json()).version, "3.1.0");
   for (const client of [stdio, http]) {
     assert.deepEqual((await client.listTools()).tools.map((tool) => tool.name).sort(), ["figma_export", "figma_status", "figma_validate_layout"]);
     assert.equal(payload(await client.callTool({ name: "figma_status", arguments: {} })).connected, false);
@@ -240,9 +240,9 @@ test("MCP returns real local image paths only after bytes are written, and valid
   assert.notEqual(exported.isError, true, exported.content[0].text);
   const saved = payload(exported);
   assert.equal(saved.meta.exportDirectory.startsWith(outputDir + "/"), true);
-  assert.equal(Object.keys(saved.assets).length, 2);
+  assert.equal(Object.keys(saved.assets).length, 3);
   for (const asset of Object.values(saved.assets)) { await access(asset.path); assert.equal((await readFile(asset.path)).length, asset.byteLength); }
-  const measured = { coordinateSpace: "root-relative", stable: true, fontsReady: true, brokenImages: [], nodes: [saved.nodes[0], ...saved.nodes[0].children].map((n) => ({ id: n.id, rootId: n.rootId, parentId: n.parentId, visible: true, bounds: n.relativeBounds })) };
+  const measured = { coordinateSpace: "root-relative", stable: true, fontsReady: true, brokenImages: [], nodes: [saved.nodes[0], ...saved.nodes[0].children].map((n) => ({ id: n.id, rootId: n.rootId, parentId: n.parentId, visible: true, bounds: n.relativeBounds, tagName: n.assetId ? "IMG" : "DIV", imageSources: n.assetId ? [saved.assets[n.assetId].path] : [] })) };
   // Synthetic measurements exercise the MCP comparison API, not browser rendering.
   measured.nodes[1].bounds = { ...measured.nodes[1].bounds, x: 10 };
   const failed = payload(await client.callTool({ name: "figma_validate_layout", arguments: { designPath: saved.meta.designPath, actual: measured } }));

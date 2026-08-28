@@ -15,7 +15,7 @@ async function loadTS(file) {
 const { prepareDesign, validateLayout, collectLayout } = await loadTS("../src/geometry.ts");
 const { persistExport } = await loadTS("../src/assets.ts");
 const layer = (id, x, y, width = 100, height = 100) => ({ id, name: id, type: "FRAME", absoluteBounds: { x, y, width, height } });
-const design = () => ({ meta: { schemaVersion: 3 }, assets: {}, nodes: [{ ...layer("root", 400.25, -20.5), children: [layer("child", 410.75, -10.25, 20, 30)] }] });
+const design = () => ({ meta: { schemaVersion: 3, exporterVersion: "3.1.0" }, assets: {}, nodes: [{ ...layer("root", 400.25, -20.5), children: [layer("child", 410.75, -10.25, 20, 30)] }] });
 const actual = () => ({ coordinateSpace: "root-relative", stable: true, fontsReady: true, brokenImages: [], nodes: [
   { id: "root", rootId: "root", parentId: null, visible: true, bounds: { x: 0, y: 0, width: 100, height: 100 } },
   { id: "child", rootId: "root", parentId: "root", visible: true, bounds: { x: 10.5, y: 10.25, width: 20, height: 30 } },
@@ -65,6 +65,23 @@ test("hidden implementations, unstable layout, missing fonts or broken assets ca
   assert.throws(() => validateLayout(design(), { ...actual(), coordinateSpace: "viewport" }), /root-relative/);
 });
 
+test("matching boxes cannot hide a wrong line-height or an omitted image", () => {
+  const d = design(), a = actual();
+  const child = d.nodes[0].children[0];
+  Object.assign(child, { type: "TEXT", fontSize: 33, lineHeight: { unit: "PERCENT", value: 100 } });
+  a.nodes[1].textStyle = { fontSize: 33, lineHeight: 100 };
+  assert.equal(validateLayout(d, a).failed[0].reason, "line-height-mismatch");
+  a.nodes[1].textStyle.lineHeight = 33;
+  assert.equal(validateLayout(d, a).passed, true);
+  child.renderAs = "image"; child.assetId = "text-image";
+  d.assets["text-image"] = { relativePath: "images/custom-font.png" };
+  assert.equal(validateLayout(d, a).failed[0].reason, "image-missing-or-wrong-source");
+  a.nodes[1].tagName = "IMG"; a.nodes[1].imageSources = ["http://localhost:8000/images/custom-font.png"];
+  assert.equal(validateLayout(d, a).passed, true);
+  a.nodes[1].imageSources = ["http://localhost:8000/images/wrong.png"];
+  assert.equal(validateLayout(d, a).passed, false);
+});
+
 test("asset export is atomic, preserves actual formats and never uses untrusted IDs as paths", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "figma-assets-test-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
@@ -94,6 +111,8 @@ test("missing or invalid image bytes leave no published export or staging direct
   await assert.rejects(persistExport(d, new Map([["image", Buffer.from("bad")]]), { outputDir: dir }), /invalid image/);
   assert.deepEqual(await readdir(dir), []);
   await assert.rejects(persistExport(design(), new Map(), { outputDir: "relative" }), /absolute/);
+  const oldPlugin = design(); delete oldPlugin.meta.exporterVersion;
+  await assert.rejects(persistExport(oldPlugin, new Map(), { outputDir: dir }), /Close and reopen/);
 });
 
 test("the standalone DOM collector normalizes page centering without mutating layout", async () => {

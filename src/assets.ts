@@ -18,6 +18,7 @@ export function imageFormat(bytes: Buffer): { extension: string; mimeType: strin
 export async function persistExport(input: unknown, assets: Map<string, Buffer>, options: ExportOptions, signal?: AbortSignal) {
   signal?.throwIfAborted();
   const design = prepareDesign(input);
+  if (design.meta.exporterVersion !== "3.1.0") throw new Error("Figma plugin v3.1.0 is required for font/image rasterization and unit-safe line-height. Close and reopen JSON Exporter, then export again");
   const output = options.outputDir ?? process.env.FIGMA_EXPORT_DIR ?? join(homedir(), "Downloads", "figma-json-exporter");
   if (!isAbsolute(output)) throw new Error("outputDir must be an absolute local directory");
   const layers = flattenLayers(design);
