@@ -197,21 +197,28 @@ function serializeLineHeight(lineHeight, fontSize) {
 
 // Explicit portable/system-font policy, not a vendor-name blacklist. A local
 // browser font inventory is not available in the Figma sandbox.
-var SYSTEM_FONT_FAMILIES = ["arial", "arial black", "helvetica", "helvetica neue", "times new roman", "times", "georgia", "verdana", "tahoma", "trebuchet ms", "courier new", "courier", "segoe ui", "sf pro", "sf pro display", "sf pro text", "pingfang sc", "pingfang tc", "pingfang hk", "microsoft yahei", "microsoft jhenghei", "simsun", "simhei", "songti sc", "heiti sc", "hiragino sans", "hiragino sans gb", "sans-serif", "serif", "monospace", "system-ui", "-apple-system", "blinkmacsystemfont"];
+var SYSTEM_FONT_FAMILIES = ["arial", "arial black", "helvetica", "helvetica neue", "times new roman", "times", "georgia", "verdana", "tahoma", "trebuchet ms", "courier new", "courier", "segoe ui", "sf pro", "sf pro display", "sf pro text", "pingfang sc", "pingfang tc", "pingfang hk", "microsoft yahei", "microsoft jhenghei", "simsun", "simhei", "songti sc", "heiti sc", "hiragino sans", "hiragino sans gb", "baidu number", "baidu number plus", "sans-serif", "serif", "monospace", "system-ui", "-apple-system", "blinkmacsystemfont"];
 function textRasterReason(node, base) {
   if (base.type !== "TEXT") return null;
-  if (readProp(node, "hasMissingFont", false)) return "missing-font";
-  if (readProp(readProp(figma, "root", {}), "documentColorProfile", "LEGACY") === "DISPLAY_P3") return "wide-gamut-text";
   var fonts = [];
   if (base.fontName !== "mixed") fonts = [base.fontName];
   else {
     try { fonts = node.getRangeAllFontNames(0, base.characters.length); } catch (e) { return "unknown-font"; }
   }
   if (!fonts.length) return "unknown-font";
+  var whitelisted = true;
   for (var i = 0; i < fonts.length; i++) {
     var family = String(fonts[i].family || "").trim().toLowerCase();
-    if (SYSTEM_FONT_FAMILIES.indexOf(family) === -1) return "non-system-font";
+    if (SYSTEM_FONT_FAMILIES.indexOf(family) === -1) { whitelisted = false; break; }
   }
+  // Whitelisted families stay selectable DOM text even when this machine lacks
+  // the font: the exported font-family lets viewers who have it get faithful
+  // rendering, and missing-font substitutes were never faithful either.
+  if (!whitelisted) {
+    if (readProp(node, "hasMissingFont", false)) return "missing-font";
+    return "non-system-font";
+  }
+  if (readProp(readProp(figma, "root", {}), "documentColorProfile", "LEGACY") === "DISPLAY_P3") return "wide-gamut-text";
   var textProps = ["fontName", "fontSize", "fontWeight", "lineHeight", "letterSpacing", "textDecoration", "textCase", "paragraphSpacing", "paragraphIndent", "fills", "strokes"];
   for (var p = 0; p < textProps.length; p++) {
     if (base[textProps[p]] === "mixed" || isMixed(readProp(node, textProps[p], null))) return "mixed-text-style";
@@ -245,6 +252,11 @@ async function resolveAutoLineHeight(node, base) {
 }
 
 function gradientRasterReason(base) {
+  // A mask is not standalone artwork: rasterizing only the mask loses its
+  // relationship with the following siblings. Keep its paint/mask metadata so
+  // the implementation can reproduce the composed mask. Its RGB color space
+  // is irrelevant when only alpha/luminance drives masking.
+  if (base.isMask) return null;
   var fills = (base.fills || []).filter(function(p) { return p.visible !== false && p.opacity !== 0; });
   var strokes = (base.strokes || []).filter(function(p) { return p.visible !== false && p.opacity !== 0; });
   function gradient(p) { return String(p.type).indexOf("GRADIENT") === 0; }
@@ -256,6 +268,15 @@ function gradientRasterReason(base) {
   var m = fills[0].gradientTransform;
   if (!Array.isArray(m) || m.length !== 2 || !m.every(function(row) { return Array.isArray(row) && row.length === 3 && row.every(function(n) { return typeof n === "number" && isFinite(n); }); }) || Math.abs(m[0][0] * m[1][1] - m[0][1] * m[1][0]) < 1e-12) return "invalid-gradient-transform";
   return null;
+}
+
+function rasterNeedsIsolatedBounds(base) {
+  if (!base.renderBounds || base.type === "TEXT") return true;
+  var strokes = (base.strokes || []).filter(function(p) { return p.visible !== false && p.opacity !== 0; });
+  if (strokes.length && base.strokeWeight > 0 && base.strokeAlign !== "INSIDE") return true;
+  return (base.effects || []).some(function(effect) {
+    return effect.visible !== false && (effect.type === "DROP_SHADOW" || effect.type === "LAYER_BLUR");
+  });
 }
 
 function rasterBoundsOf(base) {
@@ -272,7 +293,7 @@ function rasterBoundsOf(base) {
 
 async function exportRaster(item) {
   var options = { format: "PNG", constraint: { type: "SCALE", value: 2 }, contentsOnly: true, useAbsoluteBounds: true, colorProfile: "SRGB" };
-  var layout = item.layoutBounds, recoverBounds = !item.bounds;
+  var layout = item.layoutBounds, recoverBounds = !item.bounds || item.requireIsolatedBounds;
   var b = item.bounds || layout;
   if (!recoverBounds && b.x === layout.x && b.y === layout.y && b.width === layout.width && b.height === layout.height) return item.node.exportAsync(options);
   // Export a clone in an isolated transparent canvas, not a page slice that
@@ -483,9 +504,10 @@ async function serializeNodeAsync(node, context) {
   var rasterReason = textRasterReason(node, base) || gradientRasterReason(base);
   var visibleChildren = readProp(node, "children", []).filter(shouldExportNode);
   var imageLeaf = collectImageHashesFromNode(node).length > 0 && visibleChildren.length === 0;
-  var shape = context && context.shapeGroupsAsImages &&
+  var shape = context && context.shapeGroupsAsImages && !base.isMask && !(context.skipRasterIds && context.skipRasterIds[base.id]) &&
       (base.type === "VECTOR" || base.type === "BOOLEAN_OPERATION" || (base.type === "GROUP" && isPureShape(node)));
-  if (context && (rasterReason || imageLeaf || shape)) {
+  var rasterHits = rasterReason || imageLeaf || shape;
+  if (context && rasterHits && !(context.skipRasterIds && context.skipRasterIds[base.id])) {
     base.renderAs = "image";
     base.assetId = "node-" + base.id;
     base.rasterReason = rasterReason || (imageLeaf ? "image-paint" : "composite-shape");
@@ -493,7 +515,9 @@ async function serializeNodeAsync(node, context) {
     base.imageBounds = rasterBoundsOf(base);
     // Retain original image bytes as well as the faithful cropped/filtered PNG.
     if (!imageLeaf) delete base._imageHashes;
-    context.rasters.push({ id: base.assetId, node: node, layer: base, width: base.width, height: base.height, bounds: base.imageBounds, boundsSource: "absoluteRenderBounds", layoutBounds: base.absoluteBounds, transform: base.absoluteTransform, variableModes: readProp(node, "resolvedVariableModes", {}), kind: base.type === "TEXT" ? "text" : imageLeaf ? "image-render" : "shape", reason: base.rasterReason });
+    // Composite groups must always be probed in isolation: their own stroke/effect
+    // fields do not reveal paint extending from collapsed descendants.
+    context.rasters.push({ id: base.assetId, node: node, layer: base, width: base.width, height: base.height, bounds: base.imageBounds, boundsSource: "absoluteRenderBounds", requireIsolatedBounds: shape || rasterNeedsIsolatedBounds(base), layoutBounds: base.absoluteBounds, transform: base.absoluteTransform, variableModes: readProp(node, "resolvedVariableModes", {}), kind: base.type === "TEXT" ? "text" : imageLeaf ? "image-render" : "shape", reason: base.rasterReason });
     return base;
   }
 
@@ -614,15 +638,70 @@ figma.ui.onmessage = async function(msg) {
       figma.ui.postMessage(wrapMsg({ type: "image", hash: hash, bytes: Array.from(bytes) }, rid));
       imageCount++;
     }
-    for (var i = 0; i < context.rasters.length; i++) {
-      var item = context.rasters[i];
-      var bytes = await exportRaster(item);
-      var pixels = rasterPixelSize(bytes, item.bounds);
-      item.layer.imageBounds = item.bounds;
-      item.layer.imageBoundsSource = item.boundsSource;
-      data.assets[item.id] = { id: item.id, kind: item.kind, rasterReason: item.reason, nodeId: item.node.id, scale: 2, bounds: item.bounds, boundsSource: item.boundsSource, layoutBounds: item.layoutBounds, pixelWidth: pixels.width, pixelHeight: pixels.height, colorProfile: "SRGB", opacityBaked: true };
-      figma.ui.postMessage(wrapMsg({ type: "image", hash: item.id, bytes: Array.from(bytes) }, rid));
-      imageCount++;
+    // Per-item resilience: one broken layer (e.g. a VECTOR whose
+    // absoluteRenderBounds cannot be recovered even in an isolated clone) must
+    // not abort a 500-layer export. Failed rasters degrade to their full DOM
+    // subtree and the failure is reported in meta.rasterWarnings.
+    var exportWarnings = [], failedItems = [], rasterIndex = 0;
+    function replaceNodeIn(list, oldNode, newNode) {
+      for (var i = 0; i < list.length; i++) {
+        if (list[i] === oldNode) { list[i] = newNode; return true; }
+        var c = list[i].children;
+        if (c && replaceNodeIn(c, oldNode, newNode)) return true;
+      }
+      return false;
+    }
+    async function exportPendingRasters() {
+      while (rasterIndex < context.rasters.length) {
+        var item = context.rasters[rasterIndex++];
+        try {
+          var bytes = await exportRaster(item);
+          var pixels = rasterPixelSize(bytes, item.bounds);
+          item.layer.imageBounds = item.bounds;
+          item.layer.imageBoundsSource = item.boundsSource;
+          data.assets[item.id] = { id: item.id, kind: item.kind, rasterReason: item.reason, nodeId: item.node.id, scale: 2, bounds: item.bounds, boundsSource: item.boundsSource, layoutBounds: item.layoutBounds, pixelWidth: pixels.width, pixelHeight: pixels.height, colorProfile: "SRGB", opacityBaked: true };
+          figma.ui.postMessage(wrapMsg({ type: "image", hash: item.id, bytes: Array.from(bytes) }, rid));
+          imageCount++;
+        } catch (e) {
+          failedItems.push(item);
+          exportWarnings.push({ id: item.layer.id, name: item.layer.name, nodeType: item.node.type, rasterReason: item.reason, action: "degraded-to-dom", message: String((e && e.message) || e) });
+        }
+      }
+    }
+    // Each pass exports pending rasters, then re-serializes failed layers with
+    // their ids excluded from rasterization. Recovery may queue new rasters
+    // (nested shape groups), so iterate until a pass fails nothing. A failed id
+    // is never re-queued, so the loop terminates.
+    var passes = 0;
+    do {
+      await exportPendingRasters();
+      if (!failedItems.length) break;
+      var skipIds = {};
+      for (var f = 0; f < failedItems.length; f++) skipIds[failedItems[f].layer.id] = true;
+      var retry = failedItems;
+      failedItems = [];
+      for (var f = 0; f < retry.length; f++) {
+        var bad = retry[f];
+        var replacement = await serializeNodeAsync(bad.node, { shapeGroupsAsImages: context.shapeGroupsAsImages, rasters: context.rasters, skipRasterIds: skipIds });
+        if (!replacement || !replaceNodeIn(nodes, bad.layer, replacement)) throw new Error("无法恢复栅格化失败图层（DOM 降级失败）：" + bad.layer.id + " " + bad.layer.name);
+      }
+      passes++;
+    } while (passes < 5);
+    if (exportWarnings.length) {
+      data.meta.rasterWarnings = exportWarnings;
+      // A recovered subtree may carry image fills the first hash sweep missed.
+      for (var i = 0; i < nodes.length; i++) {
+        var collected = collectImageHashes(nodes[i]);
+        for (var j = 0; j < collected.length; j++) {
+          if (data.assets[collected[j]]) continue;
+          var image = figma.getImageByHash(collected[j]);
+          if (!image) throw new Error("找不到图片资源：" + collected[j]);
+          var bytes = await image.getBytesAsync();
+          data.assets[collected[j]] = { id: collected[j], kind: "image-fill" };
+          figma.ui.postMessage(wrapMsg({ type: "image", hash: collected[j], bytes: Array.from(bytes) }, rid));
+          imageCount++;
+        }
+      }
     }
     // Strip internal image bookkeeping, retaining only public metadata and geometry.
     function clean(n) { delete n._imageHashes; if (n.children) n.children.forEach(clean); }

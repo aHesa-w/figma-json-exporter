@@ -92,7 +92,9 @@ test("pure shape groups and boolean operations become atomic image layers", asyn
   assert.equal(boolean.renderAs, "image");
   assert.equal(label.renderAs, undefined);
   assert.equal(label.children[0].characters, "Keep text");
-  assert.equal(rasterCalls, 1);
+  assert.equal(rasterCalls, 0);
+  assert.equal(fixture.frames.length, 2);
+  assert.ok(fixture.frames.every(frame => frame.removed && frame.children[0].removed));
   assert.equal(result.imageCount, 2);
   assert.equal(result.data.assets[icon.assetId].kind, "shape");
 });
@@ -107,10 +109,19 @@ test("shape collapsing can be disabled and selected descendants are not duplicat
   assert.equal(result.imageCount, 0);
 });
 
-test("raster failures do not silently return an incomplete successful export", async () => {
-  const result = await pluginFixture([node("bad", { type: "VECTOR", async exportAsync() { throw new Error("raster unavailable"); } })]).request();
-  assert.equal(result.type, "error");
-  assert.match(result.message, /raster unavailable/);
+test("raster failures degrade the layer to a DOM subtree, record a warning and still succeed", async () => {
+  const fixture = pluginFixture([node("bad", { type: "VECTOR" })], { frameExport() { throw new Error("raster unavailable"); } });
+  const result = await fixture.request();
+  assert.equal(result.type, "done", result.message);
+  assert.equal(result.data.nodes[0].renderAs, undefined);
+  assert.equal(result.data.nodes[0].assetId, undefined);
+  assert.equal(result.data.nodes[0].collapsedNodeIds, undefined);
+  assert.equal(result.data.meta.rasterWarnings.length, 1);
+  assert.equal(result.data.meta.rasterWarnings[0].id, "bad");
+  assert.equal(result.data.meta.rasterWarnings[0].action, "degraded-to-dom");
+  assert.match(result.data.meta.rasterWarnings[0].message, /raster unavailable/);
+  assert.equal(fixture.frames[0].removed, true);
+  assert.equal(fixture.frames[0].children[0].removed, true);
 });
 
 test("line-height retains percent/pixel/AUTO units and emits ready-to-use CSS", async () => {
@@ -122,22 +133,25 @@ test("line-height retains percent/pixel/AUTO units and emits ready-to-use CSS", 
   assert.equal(result.data.nodes[3].rasterReason, "unresolved-auto-line-height");
 });
 
-test("non-system, missing and mixed fonts rasterize without a vendor-specific blacklist", async () => {
+test("whitelisted families stay selectable text through missing fonts; others rasterize", async () => {
   const result = await pluginFixture([
     node("system", { type: "TEXT", fontName: { family: " PingFang SC ", style: "Regular" } }),
-    ...["Baidu Number Plus ", "Douyin Sans", "MF YuanHei(Noncommercial)", "Unknown Future Font"].map(family => node(family, { type: "TEXT", characters: "保留原文", fontName: { family, style: "Regular" } })),
-    node("missing", { type: "TEXT", hasMissingFont: true }),
+    node("baidu", { type: "TEXT", characters: "保留原文", fontName: { family: "Baidu Number Plus ", style: "Regular" } }),
+    node("baidu-missing", { type: "TEXT", hasMissingFont: true, fontName: { family: "baidu number", style: "Medium" } }),
+    node("pingfang-missing", { type: "TEXT", hasMissingFont: true, fontName: { family: "PingFang HK", style: "Medium" } }),
+    ...["Douyin Sans", "MF YuanHei(Noncommercial)", "Unknown Future Font"].map(family => node(family, { type: "TEXT", characters: "保留原文", fontName: { family, style: "Regular" } })),
+    node("missing-unknown", { type: "TEXT", hasMissingFont: true, fontName: { family: "Mystery Sans", style: "Regular" } }),
     node("mixed", { type: "TEXT", characters: "ab", fontName: "Symbol(mixed)", getRangeAllFontNames() { return [{ family: "Arial", style: "Regular" }, { family: "Unknown", style: "Regular" }]; } }),
   ]).request();
   assert.equal(result.type, "done");
-  assert.equal(result.data.nodes[0].renderAs, undefined);
-  assert.equal(result.imageCount, 6);
-  for (const n of result.data.nodes.slice(1)) {
+  for (const n of result.data.nodes.slice(0, 4)) assert.equal(n.renderAs, undefined);
+  assert.equal(result.data.nodes[1].characters, "保留原文");
+  for (const n of result.data.nodes.slice(4)) {
     assert.equal(n.renderAs, "image");
     assert.equal(result.data.assets[n.assetId].kind, "text");
   }
-  assert.equal(result.data.nodes[1].characters, "保留原文");
-  assert.equal(result.data.nodes[5].rasterReason, "missing-font");
+  assert.equal(result.data.nodes[7].rasterReason, "missing-font");
+  assert.equal(result.data.nodes[8].rasterReason, "non-system-font");
 });
 
 test("image paint leaves export both original bytes and rendered crop; containers retain children", async () => {
@@ -247,17 +261,68 @@ test("outside/center strokes, shadows, blur and glyph overhang use an expanded i
   }
 });
 
-test("expanded export failures and unrecoverable visual bounds clean up temporary nodes", async () => {
+test("partially clipped render bounds are remeasured before exporting outside strokes", async () => {
+  const source = clippedNode("partial-outside", {
+    type: "RECTANGLE", x: 40, y: 60, width: 80, height: 80,
+    fills: [{ type: "IMAGE", imageHash: "photo", visible: true }],
+    strokes: [{ type: "SOLID", color: { r: 1, g: 1, b: 1 }, visible: true }],
+    strokeAlign: "OUTSIDE", strokeWeight: 3,
+  }, { x: 37, y: 57, width: 86, height: 86 });
+  // Figma may expose only the portion surviving an ancestor clip. Unioning
+  // this with layout still misses the bottom outside stroke.
+  source.absoluteRenderBounds = { x: 37, y: 57, width: 86, height: 43 };
+  const fixture = pluginFixture([source]);
+  const result = await fixture.request();
+  assert.equal(result.type, "done", result.message);
+  const exported = result.data.nodes[0];
+  assert.equal(exported.renderBounds.height, 43);
+  assert.deepEqual(exported.imagePlacement, { x: -3, y: -3, width: 86, height: 86, left: -3, top: -3, right: 83, bottom: 83 });
+  assert.equal(exported.imageBoundsSource, "isolated-clone");
+  assert.equal(result.data.assets[exported.assetId].pixelHeight, 172);
+
+  const child = node("outside-child", { type: "VECTOR", strokes: [{ type: "SOLID", color: { r: 1, g: 1, b: 1 } }], strokeAlign: "OUTSIDE", strokeWeight: 3 });
+  const group = clippedNode("partial-group", { type: "GROUP", width: 150, height: 80, children: [child] }, { x: -3, y: -3, width: 156, height: 86 });
+  group.absoluteRenderBounds = { x: -3, y: -3, width: 156, height: 43 };
+  const grouped = pluginFixture([group]);
+  const groupedResult = await grouped.request();
+  assert.equal(groupedResult.type, "done", groupedResult.message);
+  assert.equal(groupedResult.data.nodes[0].rasterReason, "composite-shape");
+  assert.equal(groupedResult.data.nodes[0].imageBounds.height, 86);
+  assert.equal(groupedResult.data.nodes[0].imageBoundsSource, "isolated-clone");
+});
+
+test("gradient masks remain composable nodes instead of standalone rasters", async () => {
+  const mask = node("gradient-mask", {
+    type: "VECTOR", isMask: true, maskType: "ALPHA",
+    fills: [{ type: "GRADIENT_LINEAR", visible: true, gradientTransform: [[1, 0, 0], [0, 1, 0]], gradientStops: [
+      { position: 0, color: { r: 1, g: 1, b: 1, a: 0 } },
+      { position: 1, color: { r: 1, g: 1, b: 1, a: 1 } },
+    ] }],
+    absoluteRenderBounds: null,
+  });
+  const fixture = pluginFixture([mask], { documentColorProfile: "DISPLAY_P3" });
+  const result = await fixture.request();
+  assert.equal(result.type, "done", result.message);
+  assert.equal(result.data.nodes[0].renderAs, undefined);
+  assert.equal(result.data.nodes[0].isMask, true);
+  assert.equal(result.data.nodes[0].fills[0].type, "GRADIENT_LINEAR");
+  assert.equal(fixture.frames.length, 0);
+});
+
+test("expanded export failures and unrecoverable visual bounds degrade to DOM and clean up temporary nodes", async () => {
   const source = node("bad", { type: "VECTOR", absoluteRenderBounds: { x: -4, y: -4, width: 108, height: 108 } });
   const fixture = pluginFixture([source], { frameExport() { throw new Error("export failed"); } });
   const result = await fixture.request();
-  assert.equal(result.type, "error");
+  assert.equal(result.type, "done", result.message);
+  assert.equal(result.data.nodes[0].renderAs, undefined);
+  assert.match(result.data.meta.rasterWarnings[0].message, /export failed/);
   assert.equal(fixture.frames[0].removed, true);
   assert.equal(fixture.frames[0].children[0].removed, true);
   const recovery = pluginFixture([node("missing", { type: "VECTOR", absoluteRenderBounds: null })]);
   const missing = await recovery.request();
-  assert.equal(missing.type, "error");
-  assert.match(missing.message, /Cannot recover absoluteRenderBounds.*missing.*unclipped clone/);
+  assert.equal(missing.type, "done", missing.message);
+  assert.match(missing.data.meta.rasterWarnings[0].message, /Cannot recover absoluteRenderBounds.*missing.*unclipped clone/);
+  assert.equal(missing.data.nodes[0].renderAs, undefined);
   assert.equal(recovery.frames[0].removed, true);
   assert.equal(recovery.frames[0].children[0].removed, true);
 });
@@ -321,28 +386,36 @@ test("recovery preserves rotated zero-height shapes and rejects clipped PNG dime
   assert.deepEqual(Array.from(fixture.frames[0].children[0].relativeTransform[1]), [1, 0, 2]);
   const bad = pluginFixture([source], { frameExport: () => new Uint8Array(png(1, 1)) });
   const failed = await bad.request();
-  assert.equal(failed.type, "error");
-  assert.match(failed.message, /Raster pixel size/);
+  assert.equal(failed.type, "done", failed.message);
+  assert.match(failed.data.meta.rasterWarnings[0].message, /Raster pixel size/);
+  assert.equal(failed.data.nodes[0].renderAs, undefined);
   assert.equal(bad.frames[0].removed, true);
   assert.equal(bad.frames[0].children[0].removed, true);
 });
 
-test("invalid or throwing recovered bounds never drop a layer or publish a successful export", async () => {
+test("invalid or throwing recovered bounds degrade to DOM without dropping the layer", async () => {
   for (const visual of [null, { x: NaN, y: 0, width: 100, height: 100 }, { x: 0, y: 0, width: -1, height: 100 }, () => { throw new Error("API unavailable"); }]) {
     const fixture = pluginFixture([clippedNode("unrecoverable", { type: "VECTOR" }, visual)]);
-    assert.equal((await fixture.request()).type, "error");
-    assert.equal(fixture.messages.some(m => m.type === "done"), false);
+    const result = await fixture.request();
+    assert.equal(result.type, "done", result.message);
+    assert.equal(result.data.nodes[0].renderAs, undefined);
+    assert.equal(result.data.meta.rasterWarnings.length, 1);
+    assert.equal(result.data.meta.rasterWarnings[0].id, "unrecoverable");
     assert.equal(fixture.frames[0].removed, true);
     assert.equal(fixture.frames[0].children[0].removed, true);
   }
 });
 
-test("expanded raster keeps inherited variable modes and rejects unresolvable color context", async () => {
+test("expanded raster keeps inherited variable modes and degrades when color context is unresolvable", async () => {
   const source = node("theme", { type: "VECTOR", resolvedVariableModes: { colors: "dark" }, absoluteRenderBounds: { x: -4, y: -4, width: 108, height: 108 } });
   const fixture = pluginFixture([source]);
   assert.equal((await fixture.request()).type, "done");
   assert.equal(fixture.frames[0].modes.colors, "dark");
   const failed = pluginFixture([source], { missingVariableCollection: true });
-  assert.equal((await failed.request()).type, "error");
+  const result = await failed.request();
+  assert.equal(result.type, "done", result.message);
+  assert.equal(result.data.meta.rasterWarnings.length, 1);
+  assert.match(result.data.meta.rasterWarnings[0].message, /Cannot preserve variable mode/);
+  assert.equal(result.data.nodes[0].renderAs, undefined);
   assert.equal(failed.frames[0].removed, true);
 });
