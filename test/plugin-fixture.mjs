@@ -17,6 +17,7 @@ export function png(width, height) {
   return Buffer.concat([PNG.subarray(0, 8), chunk("IHDR", header), chunk("IDAT", deflateSync(Buffer.alloc((width * 4 + 1) * height))), chunk("IEND", Buffer.alloc(0))]);
 }
 // Synthetic browser style samples for protocol/unit tests, not visual evidence.
+export const flowStyle = (overrides = {}) => ({ display: "block", position: "relative", cssFloat: "none", insets: Array(4).fill("auto"), margins: Array(4).fill("0px"), transform: "none", translate: "none", wrappers: [], ...overrides });
 export const renderStyle = (overrides = {}) => ({ opacity: 1, position: "relative", overflowX: "visible", overflowY: "visible", clipPath: "none", maskImage: "none", contain: "none", borderBoxWidth: 100, borderBoxHeight: 100, cornerRadii: ["0px", "0px", "0px", "0px"], wrapperEffects: [], ...overrides });
 export function node(id, properties = {}) {
   return { id, name: id, type: "FRAME", visible: true, opacity: 1, x: 0, y: 0, width: 100, height: 100,

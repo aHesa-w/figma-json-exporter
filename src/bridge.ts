@@ -1,13 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { WebSocket } from "ws";
 import { persistExport, type ExportOptions } from "./assets.js";
+import { exportPen, penStatus } from "./pen.js";
 
 export const SERVER_NAME = "figma-json-exporter";
-export const SERVER_VERSION = "3.4.1";
+export const SERVER_VERSION = "3.6.0";
 export const EXPORT_TIMEOUT_MS = 120_000;
 
 export interface Exporter {
-  connected(signal?: AbortSignal): Promise<boolean>;
+  status(signal?: AbortSignal, options?: Pick<ExportOptions, "mode" | "penPath">): Promise<Record<string, unknown>>;
   export(signal?: AbortSignal, options?: ExportOptions): Promise<unknown>;
 }
 
@@ -28,8 +29,9 @@ export class Bridge implements Exporter {
   private active?: ExportJob;
   private queue: ExportJob[] = [];
 
-  async connected(): Promise<boolean> {
-    return this.plugin?.readyState === WebSocket.OPEN;
+  async status(_signal?: AbortSignal, options: Pick<ExportOptions, "mode" | "penPath"> = {}): Promise<Record<string, unknown>> {
+    if (options.mode === "pen") return penStatus(options.penPath);
+    return { connected: this.plugin?.readyState === WebSocket.OPEN, mode: "figma", pluginName: "Figma JSON Exporter" };
   }
 
   attach(plugin: WebSocket): void {
@@ -80,6 +82,7 @@ export class Bridge implements Exporter {
   }
 
   export(signal?: AbortSignal, options: ExportOptions = {}): Promise<unknown> {
+    if (options.mode === "pen") return exportPen(signal, options);
     return new Promise((resolve, reject) => {
       if (signal?.aborted) return reject(new Error("Export cancelled"));
       if (this.plugin?.readyState !== WebSocket.OPEN) {
@@ -158,8 +161,11 @@ export class HTTPExporter implements Exporter {
     return body;
   }
 
-  async connected(signal?: AbortSignal): Promise<boolean> {
-    return (await this.request("/status", signal)).connected === true;
+  async status(signal?: AbortSignal, options: Pick<ExportOptions, "mode" | "penPath"> = {}): Promise<Record<string, unknown>> {
+    const query = new URLSearchParams();
+    if (options.mode) query.set("mode", options.mode);
+    if (options.penPath) query.set("penPath", options.penPath);
+    return this.request("/status" + (query.size ? `?${query}` : ""), signal);
   }
 
   async export(signal?: AbortSignal, options: ExportOptions = {}): Promise<unknown> {

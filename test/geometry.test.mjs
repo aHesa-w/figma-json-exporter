@@ -17,7 +17,7 @@ const { parseCSSColor } = await loadTS("../src/rendering.ts");
 const { persistExport } = await loadTS("../src/assets.ts");
 const layer = (id, x, y, width = 100, height = 100) => ({ id, name: id, type: "FRAME", absoluteBounds: { x, y, width, height } });
 const design = () => ({ meta: { schemaVersion: 3, exporterVersion: "3.4.1" }, assets: {}, nodes: [{ ...layer("root", 400.25, -20.5), children: [layer("child", 410.75, -10.25, 20, 30)] }] });
-const actual = () => ({ collectorVersion: 4, coordinateSpace: "root-relative", stable: true, fontsReady: true, brokenImages: [], nodes: [
+const actual = () => ({ collectorVersion: 5, coordinateSpace: "root-relative", stable: true, fontsReady: true, brokenImages: [], nodes: [
   { id: "root", rootId: "root", parentId: null, visible: true, renderStyle: renderStyle(), bounds: { x: 0, y: 0, width: 100, height: 100 } },
   { id: "child", rootId: "root", parentId: "root", visible: true, renderStyle: renderStyle({ borderBoxWidth: 20, borderBoxHeight: 30 }), bounds: { x: 10.5, y: 10.25, width: 20, height: 30 } },
 ] });
@@ -153,7 +153,7 @@ test("old collectors fail globally and unsupported properties remain explicitly 
   const d = design(), a = actual();
   delete a.collectorVersion;
   assert.equal(validateLayout(d, a).passed, false);
-  a.collectorVersion = 4;
+  a.collectorVersion = 5;
   const incomplete = structuredClone(a);
   incomplete.nodes[0].renderStyle = { wrapperEffects: [] };
   assert.equal(validateLayout(d, incomplete).collectorCompatible, false);
@@ -256,15 +256,19 @@ test("the standalone DOM collector normalizes page centering without mutating la
   const root = { dataset: { d2cId: "root" }, querySelectorAll: () => [], parentElement: null, hasAttribute: () => true, getBoundingClientRect: () => ({ x: 500, y: 20, width: 100, height: 100 }), closest() { return root; } };
   const child = { dataset: { d2cId: "child" }, querySelectorAll: () => [], parentElement: root, getBoundingClientRect: () => ({ x: 510.5, y: 30.25, width: 20, height: 30 }), closest() { return root; } };
   const context = vm.createContext({
-    document: { fonts: { ready: Promise.resolve(), status: "loaded" }, images: [], querySelectorAll: () => [root, child] },
-    getComputedStyle: () => ({ backgroundImage: "linear-gradient(90deg, rgb(255, 0, 0), rgb(0, 0, 255))", backgroundOrigin: "border-box", backgroundClip: "border-box", backgroundSize: "100% 100%", backgroundPosition: "0% 0%", display: "block", visibility: "visible", opacity: "1", position: "relative", overflowX: "visible", overflowY: "visible", clipPath: "none", maskImage: "none", contain: "none", width: "100px", height: "100px", boxSizing: "border-box", fontSize: "16px", fontWeight: "400", fontStyle: "normal", lineHeight: "0px", letterSpacing: "normal", borderTopLeftRadius: "0px", borderTopRightRadius: "0px", borderBottomRightRadius: "0px", borderBottomLeftRadius: "0px" }),
+    crypto: globalThis.crypto, document: { fonts: { ready: Promise.resolve(), status: "loaded" }, images: [], querySelectorAll: () => [root, child] },
+    getComputedStyle: () => ({ cssFloat: "none", transform: "none", translate: "none", top: "auto", right: "auto", bottom: "auto", left: "auto", marginTop: "0px", marginRight: "0px", marginBottom: "0px", marginLeft: "0px", backgroundImage: "linear-gradient(90deg, rgb(255, 0, 0), rgb(0, 0, 255))", backgroundOrigin: "border-box", backgroundClip: "border-box", backgroundSize: "100% 100%", backgroundPosition: "0% 0%", display: "block", visibility: "visible", opacity: "1", position: "relative", overflowX: "visible", overflowY: "visible", clipPath: "none", maskImage: "none", contain: "none", width: "100px", height: "100px", boxSizing: "border-box", fontSize: "16px", fontWeight: "400", fontStyle: "normal", lineHeight: "0px", letterSpacing: "normal", borderTopLeftRadius: "0px", borderTopRightRadius: "0px", borderBottomRightRadius: "0px", borderBottomLeftRadius: "0px" }),
     requestAnimationFrame: (cb) => setImmediate(cb), innerWidth: 1200, innerHeight: 900, devicePixelRatio: 1,
   });
   const measured = await vm.runInContext(`(${collectLayout.toString()})()`, context);
   assert.equal(validateLayout(design(), JSON.parse(JSON.stringify(measured)), 0).passed, true);
   assert.equal(measured.nodes[1].textStyle.lineHeight, 0);
   assert.equal(measured.nodes[1].textStyle.letterSpacing, 0);
-  assert.equal(measured.collectorVersion, 4);
+  assert.equal(measured.collectorVersion, 5);
+  assert.match(measured.sampleId, /^[0-9a-f]{32}$/);
+  assert.ok(Number.isFinite(Date.parse(measured.collectedAt)));
+  assert.equal(measured.nodes[0].flowStyle.cssFloat, "none");
+  assert.deepEqual(Array.from(measured.nodes[0].flowStyle.insets), Array(4).fill("auto"));
   for (const key of ["backgroundImage", "backgroundOrigin", "backgroundClip", "backgroundSize", "backgroundPosition"]) assert.equal(measured.nodes[0].renderStyle[key], context.getComputedStyle()[key]);
   const wrapper = { parentElement: root, hasAttribute: () => false, closest: () => root };
   child.parentElement = wrapper;
@@ -273,6 +277,9 @@ test("the standalone DOM collector normalizes page centering without mutating la
   const wrapped = await vm.runInContext(`(${collectLayout.toString()})()`, context);
   assert.deepEqual(Array.from(wrapped.nodes[1].renderStyle.wrapperEffects), ["overflowX:hidden", "opacity:0.5"]);
   assert.equal(validateLayout(design(), JSON.parse(JSON.stringify(wrapped))).passed, false);
+  assert.notEqual(wrapped.sampleId, measured.sampleId);
+  assert.equal(wrapped.nodes[1].flowStyle.wrappers.length, 1);
+  assert.equal(wrapped.nodes[1].flowStyle.wrappers[0].position, "relative");
   child.parentElement = root;
   const img = { tagName: "IMG", dataset: { d2cAsset: "raster" }, currentSrc: "/images/raster.png", naturalWidth: 56, naturalHeight: 76, complete: true, decode: () => Promise.resolve(), closest: () => child, getBoundingClientRect: () => ({ x: 506.5, y: 26.25, width: 28, height: 38 }) };
   root.querySelectorAll = child.querySelectorAll = () => [img];

@@ -52,7 +52,11 @@ export async function startServer(host: string, port: number) {
       const methods = path === "/export" ? ["GET", "POST"] : ["GET"];
       if (!methods.includes(req.method || "")) { res.setHeader("Allow", methods.join(", ")); json(res, 405, { error: "Method not allowed" }); return; }
       if (path === "/health") json(res, 200, { status: "ok", name: SERVER_NAME, version: SERVER_VERSION });
-      else if (path === "/status") json(res, 200, { connected: await bridge.connected(), pluginName: "Figma JSON Exporter" });
+      else if (path === "/status") {
+        const mode = target.searchParams.get("mode") ?? "figma";
+        if (!['figma', 'pen'].includes(mode)) throw new Error("mode must be figma or pen");
+        json(res, 200, await bridge.status(undefined, { mode: mode as "figma" | "pen", penPath: target.searchParams.get("penPath") ?? undefined }));
+      }
       else {
         const controller = new AbortController();
         res.on("close", () => controller.abort());
@@ -62,12 +66,21 @@ export async function startServer(host: string, port: number) {
           let byteLength = 0;
           for await (const chunk of req) {
             byteLength += chunk.length;
-            if (byteLength > 16_384) throw new Error("Export options exceed 16KB");
+            if (byteLength > 8 * 1024 * 1024) throw new Error("Export options exceed 8MB");
             chunks.push(chunk);
           }
           const body = Buffer.concat(chunks).toString("utf8");
           if (body) options = JSON.parse(body);
-          if (!options || typeof options !== "object" || Array.isArray(options) || (options.outputDir !== undefined && (typeof options.outputDir !== "string" || !isAbsolute(options.outputDir))) || (options.shapeGroupsAsImages !== undefined && typeof options.shapeGroupsAsImages !== "boolean")) throw new Error("Invalid export options");
+          if (!options || typeof options !== "object" || Array.isArray(options)
+            || (options.mode !== undefined && !["figma", "pen"].includes(options.mode))
+            || (options.outputDir !== undefined && (typeof options.outputDir !== "string" || !isAbsolute(options.outputDir)))
+            || (options.penPath !== undefined && (typeof options.penPath !== "string" || !isAbsolute(options.penPath)))
+            || (options.nodeIds !== undefined && (!Array.isArray(options.nodeIds) || !options.nodeIds.length || !options.nodeIds.every(id => typeof id === "string" && id)))
+            || (options.penBounds !== undefined && (!Array.isArray(options.penBounds) || !options.penBounds.every(item => item && typeof item.id === "string" && [item.x, item.y, item.width, item.height].every(Number.isFinite) && item.width >= 0 && item.height >= 0)))
+            || (options.penRasters !== undefined && (!Array.isArray(options.penRasters) || !options.penRasters.every(item => item && typeof item.id === "string" && typeof item.path === "string" && isAbsolute(item.path) && (item.scale === undefined || (Number.isFinite(item.scale) && item.scale > 0 && item.scale <= 4)) && (item.bounds === undefined || (typeof item.bounds.id === "string" && [item.bounds.x, item.bounds.y, item.bounds.width, item.bounds.height].every(Number.isFinite) && item.bounds.width >= 0 && item.bounds.height >= 0)))))
+            || (options.shapeGroupsAsImages !== undefined && typeof options.shapeGroupsAsImages !== "boolean")) throw new Error("Invalid export options");
+          if ((options.mode ?? "figma") !== "pen" && (options.penPath || options.nodeIds || options.penBounds || options.penRasters)) throw new Error("Pen export options require mode=pen");
+          if (options.mode === "pen" && !options.penPath) throw new Error("mode=pen requires penPath");
         }
         json(res, 200, await bridge.export(controller.signal, options));
       }

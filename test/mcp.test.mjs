@@ -12,7 +12,7 @@ import { WebSocket } from "ws";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { node, clippedNode, pluginFixture, renderStyle } from "./plugin-fixture.mjs";
+import { PNG, node, clippedNode, pluginFixture, renderStyle, flowStyle } from "./plugin-fixture.mjs";
 
 async function availablePort() {
   const server = createServer();
@@ -69,7 +69,7 @@ test("standalone compiled entry auto-starts shared service; stdio and HTTP expos
   const f = await fixture(t);
   const stdio = await f.client();
   const http = await f.client("http");
-  assert.equal((await (await fetch(f.base + "/health")).json()).version, "3.4.1");
+  assert.equal((await (await fetch(f.base + "/health")).json()).version, "3.6.0");
   for (const client of [stdio, http]) {
     assert.deepEqual((await client.listTools()).tools.map((tool) => tool.name).sort(), ["figma_export", "figma_status", "figma_validate_layout"]);
     assert.equal(payload(await client.callTool({ name: "figma_status", arguments: {} })).connected, false);
@@ -93,6 +93,73 @@ test("MCP export round trip executes the real plugin filtering logic", { timeout
   const exported = await client.callTool({ name: "figma_export", arguments: {} });
   assert.notEqual(exported.isError, true);
   assert.deepEqual(payload(exported).nodes[0].children.map((n) => n.id), ["visible"]);
+});
+
+test("existing MCP names support Pen status, selection export, Auto Layout geometry and local image assets", { timeout: 15000 }, async (t) => {
+  const f = await fixture(t);
+  const client = await f.client();
+  const penDir = join(f.env.FIGMA_EXPORT_DIR, "pen-source");
+  await import("node:fs/promises").then(({ mkdir }) => mkdir(penDir, { recursive: true }));
+  await writeFile(join(penDir, "photo.png"), PNG);
+  const penPath = join(penDir, "screen.pen");
+  await writeFile(penPath, JSON.stringify({
+    version: "2.17",
+    themes: { mode: ["light", "dark"] },
+    variables: { background: { type: "color", value: [{ value: "#ffffffff", theme: { mode: "light" } }, { value: "#000000ff", theme: { mode: "dark" } }] } },
+    children: [
+      { type: "frame", id: "button-component", name: "Button", reusable: true, width: 100, height: 30, layout: "horizontal", children: [{ type: "text", id: "button-label", width: 100, height: 30, content: "Default", fill: "#000000ff" }] },
+      { type: "frame", id: "screen", name: "Screen", x: 100, y: 200, width: 300, height: 200, layout: "vertical", padding: 10, gap: 5, clip: true, opacity: 0.8, fill: "$background", children: [
+      { type: "text", id: "title", width: 280, height: 20, content: "Pen page", fontFamily: "Arial", fontSize: 16, fontWeight: "500", lineHeight: 1.25, fill: "#112233ff" },
+      { type: "rectangle", id: "hidden", enabled: false, width: 280, height: 99, fill: "#ff0000" },
+      { type: "frame", id: "row", width: "fill_container", height: 50, layout: "horizontal", gap: 10, children: [
+        { type: "rectangle", id: "photo", width: 50, height: 50, fill: { type: "image", url: "./photo.png", mode: "fill" } },
+        { type: "rectangle", id: "shape", width: 20, height: 50, cornerRadius: [1, 2, 3, 4], fill: { type: "gradient", gradientType: "linear", rotation: 90, colors: [{ color: "#ff0000ff", position: 0 }, { color: "#0000ffff", position: 1 }] } },
+      ] },
+      { type: "ref", id: "submit", ref: "button-component", descendants: { "button-label": { content: "Submit" } } },
+    ] },
+      { type: "text", id: "dynamic", x: 500, y: 0, width: "fit_content", height: "fit_content", content: "Engine sized", fill: "#000000ff" },
+      { type: "ellipse", id: "complex", x: 700, y: 0, width: 1, height: 1, fill: { type: "gradient", gradientType: "radial", colors: [{ color: "#ffffffff", position: 0 }, { color: "#000000ff", position: 1 }] } },
+    ],
+  }));
+  const status = payload(await client.callTool({ name: "figma_status", arguments: { mode: "pen", penPath } }));
+  assert.equal(status.connected, true);
+  assert.equal(status.mode, "pen");
+  assert.equal(status.topLevelNodes.find(node => node.id === "screen").name, "Screen");
+  const exported = await client.callTool({ name: "figma_export", arguments: { mode: "pen", penPath, nodeIds: ["screen"] } });
+  assert.notEqual(exported.isError, true, exported.content[0].text);
+  const saved = payload(exported);
+  assert.equal(saved.meta.sourceMode, "pen");
+  assert.equal(saved.meta.sourceVersion, "2.17");
+  assert.deepEqual(saved.nodes[0].absoluteBounds, { x: 100, y: 200, width: 300, height: 200, left: 100, top: 200, right: 400, bottom: 400 });
+  assert.deepEqual(saved.nodes[0].children.map(node => node.id), ["title", "row", "submit"]);
+  assert.deepEqual(saved.nodes[0].children[0].absoluteBounds, { x: 110, y: 210, width: 280, height: 20, left: 110, top: 210, right: 390, bottom: 230 });
+  const row = saved.nodes[0].children[1];
+  assert.deepEqual(row.absoluteBounds, { x: 110, y: 235, width: 280, height: 50, left: 110, top: 235, right: 390, bottom: 285 });
+  assert.equal(row.children[1].gradient.angleDeg, 270);
+  assert.match(row.children[1].gradient.css, /^linear-gradient\(270deg/);
+  const button = saved.nodes[0].children[2];
+  assert.equal(button.id, "submit");
+  assert.equal(button.children[0].id, "submit/button-label");
+  assert.equal(button.children[0].characters, "Submit", JSON.stringify(button.children[0]));
+  const imageId = row.children[0].fills[0].imageHash;
+  assert.equal(saved.assets[imageId].mimeType, "image/png");
+  await access(saved.assets[imageId].path);
+  assert.equal((await readFile(saved.assets[imageId].path)).equals(PNG), true);
+  assert.match(saved.meta.exportDirectory, /export-/);
+  const unresolved = await client.callTool({ name: "figma_export", arguments: { mode: "pen", penPath, nodeIds: ["dynamic"] } });
+  assert.equal(unresolved.isError, true);
+  assert.match(unresolved.content[0].text, /unresolved size/);
+  const bounded = payload(await client.callTool({ name: "figma_export", arguments: { mode: "pen", penPath, nodeIds: ["dynamic"], penBounds: [{ id: "dynamic", x: 500, y: 0, width: 96.5, height: 24 }] } }));
+  assert.equal(bounded.nodes[0].absoluteBounds.width, 96.5);
+  const unsupported = await client.callTool({ name: "figma_export", arguments: { mode: "pen", penPath, nodeIds: ["complex"] } });
+  assert.equal(unsupported.isError, true);
+  assert.match(unsupported.content[0].text, /requires raster export/);
+  const rasterized = payload(await client.callTool({ name: "figma_export", arguments: { mode: "pen", penPath, nodeIds: ["complex"], penRasters: [{ id: "complex", path: join(penDir, "photo.png"), scale: 1, bounds: { id: "complex", x: 700, y: 0, width: 1, height: 1 } }] } }));
+  assert.equal(rasterized.nodes[0].renderAs, "image");
+  assert.equal(rasterized.nodes[0].imageBoundsSource, "pen-engine-raster");
+  const wrongMode = await client.callTool({ name: "figma_validate_layout", arguments: { mode: "figma", designPath: saved.meta.designPath, actualPath: join(penDir, "not-read.json") } });
+  assert.equal(wrongMode.isError, true);
+  assert.match(wrongMode.content[0].text, /does not match design source pen/);
 });
 
 test("multiple clients reuse one service and exports are serialized with request isolation", { timeout: 15000 }, async (t) => {
@@ -251,8 +318,10 @@ test("MCP returns real local image paths only after bytes are written, and valid
   assert.equal(saved.assets[recovered.assetId].pixelWidth, 224);
   assert.equal(saved.assets[recovered.assetId].pixelHeight, 232);
   assert.equal(layout.find(n => n.id === "photo").imageBoundsSource, "isolated-clone");
+  const plan = JSON.parse(await readFile(saved.meta.flowPlanPath, "utf8"));
+  assert.deepEqual(plan.stages, ["baseline", "flow"]);
   for (const asset of Object.values(saved.assets)) { await access(asset.path); assert.equal((await readFile(asset.path)).length, asset.byteLength); }
-  const measured = { collectorVersion: 4, coordinateSpace: "root-relative", stable: true, fontsReady: true, brokenImages: [], nodes: [saved.nodes[0], ...saved.nodes[0].children].map((n) => ({ id: n.id, rootId: n.rootId, parentId: n.parentId, visible: true, bounds: n.relativeBounds, tagName: n.assetId ? "IMG" : "DIV", imageSources: n.assetId ? [saved.assets[n.assetId].path] : [], textStyle: n.type === "TEXT" ? { fontSize: n.fontSize, lineHeight: n.lineHeight.pixels, fontWeight: n.fontWeight, fontStyle: "normal", letterSpacing: 0, textAlign: "left", direction: "ltr", textDecorationLine: "none", color: n.textColor.css, textFillColor: n.textColor.css } : undefined, assetImages: n.assetId ? [{ assetId: n.assetId, src: saved.assets[n.assetId].path, bounds: n.relativeImageBounds, naturalWidth: saved.assets[n.assetId].pixelWidth, naturalHeight: saved.assets[n.assetId].pixelHeight, opacity: 1, objectFit: "fill" }] : [], renderStyle: renderStyle(n.id === "root" ? { ...n.gradient, backgroundImage: n.gradient.css, opacity: 0.6, overflowX: "hidden", overflowY: "hidden", cornerRadii: Array(4).fill("12px") } : {}) })) };
+  const measured = { sampleId: "mcp-baseline", collectedAt: new Date().toISOString(), viewport: { width: 1200, height: 900, devicePixelRatio: 1 }, collectorVersion: 5, coordinateSpace: "root-relative", stable: true, fontsReady: true, brokenImages: [], nodes: [saved.nodes[0], ...saved.nodes[0].children].map((n) => ({ id: n.id, rootId: n.rootId, parentId: n.parentId, visible: true, bounds: n.relativeBounds, tagName: n.assetId ? "IMG" : "DIV", imageSources: n.assetId ? [saved.assets[n.assetId].path] : [], textStyle: n.type === "TEXT" ? { fontSize: n.fontSize, lineHeight: n.lineHeight.pixels, fontWeight: n.fontWeight, fontStyle: "normal", letterSpacing: 0, textAlign: "left", direction: "ltr", textDecorationLine: "none", color: n.textColor.css, textFillColor: n.textColor.css } : undefined, assetImages: n.assetId ? [{ assetId: n.assetId, src: saved.assets[n.assetId].path, bounds: n.relativeImageBounds, naturalWidth: saved.assets[n.assetId].pixelWidth, naturalHeight: saved.assets[n.assetId].pixelHeight, opacity: 1, objectFit: "fill" }] : [], renderStyle: renderStyle(n.id === "root" ? { ...n.gradient, backgroundImage: n.gradient.css, opacity: 0.6, overflowX: "hidden", overflowY: "hidden", cornerRadii: Array(4).fill("12px") } : {}) })) };
   // Synthetic measurements exercise the MCP comparison API, not browser rendering.
   measured.nodes[1].bounds = { ...measured.nodes[1].bounds, x: 10 };
   const failed = payload(await client.callTool({ name: "figma_validate_layout", arguments: { designPath: saved.meta.designPath, actual: measured } }));
@@ -264,6 +333,8 @@ test("MCP returns real local image paths only after bytes are written, and valid
   const passed = payload(await client.callTool({ name: "figma_validate_layout", arguments: { designPath: saved.meta.designPath, actualPath } }));
   assert.equal(passed.passed, true);
   assert.equal(passed.visualAcceptance, "not-verified");
+  assert.equal(passed.workflowComplete, false);
+  assert.equal(passed.phase, "baseline");
   await access(passed.reportPath);
   // Exercise inline schema retention as well as the actualPath route above.
   const inlinePassed = payload(await client.callTool({ name: "figma_validate_layout", arguments: { designPath: saved.meta.designPath, actual: measured } }));
@@ -282,4 +353,26 @@ test("MCP returns real local image paths only after bytes are written, and valid
   const wrongGradient = payload(await client.callTool({ name: "figma_validate_layout", arguments: { designPath: saved.meta.designPath, actual: measured } }));
   assert.equal(wrongGradient.passed, false);
   assert.equal(wrongGradient.failed[0].propertyMismatches[0].property, "gradient-direction");
+  measured.nodes[0].renderStyle.backgroundImage = saved.nodes[0].gradient.css;
+  const flowArgs = { designPath: saved.meta.designPath, actual: measured, phase: "flow", baselineReportPath: passed.reportPath };
+  const reused = await client.callTool({ name: "figma_validate_layout", arguments: flowArgs });
+  assert.equal(reused.isError, true);
+  assert.match(reused.content[0].text, /new browser sample/);
+  await delay(3);
+  measured.sampleId = "mcp-new-flow-sample";
+  measured.collectedAt = new Date().toISOString();
+  for (const n of measured.nodes) n.flowStyle = flowStyle();
+  measured.nodes[3].renderStyle.position = measured.nodes[3].flowStyle.position = "absolute";
+  const absoluteFlow = payload(await client.callTool({ name: "figma_validate_layout", arguments: flowArgs }));
+  assert.equal(absoluteFlow.passed, false);
+  assert.equal(absoluteFlow.flowMismatches[0].id, "text");
+  measured.nodes[3].renderStyle.position = measured.nodes[3].flowStyle.position = "relative";
+  const flowPassed = payload(await client.callTool({ name: "figma_validate_layout", arguments: flowArgs }));
+  assert.equal(flowPassed.phase, "flow");
+  assert.equal(flowPassed.workflowComplete, true);
+  await writeFile(actualPath, JSON.stringify(measured));
+  const fileFlow = payload(await client.callTool({ name: "figma_validate_layout", arguments: { designPath: saved.meta.designPath, actualPath, phase: "flow", baselineReportPath: passed.reportPath } }));
+  assert.equal(fileFlow.workflowComplete, true);
+  const missingBaseline = await client.callTool({ name: "figma_validate_layout", arguments: { designPath: saved.meta.designPath, actual: measured, phase: "flow" } });
+  assert.equal(missingBaseline.isError, true);
 });

@@ -1,7 +1,8 @@
 import { renderingRequirements, validateRendering, type RenderStyle, type TextStyle } from "./rendering.js";
 import { linearGradient } from "./gradients.js";
+import type { FlowStyle } from "./flow.js";
 
-export const COLLECTOR_VERSION = 4;
+export const COLLECTOR_VERSION = 5;
 
 export interface Rect {
   x: number; y: number; width: number; height: number;
@@ -83,9 +84,12 @@ export interface ActualLayer {
   imageSources?: string[];
   textStyle?: TextStyle;
   renderStyle?: RenderStyle;
+  flowStyle?: FlowStyle;
   assetImages?: Array<{ assetId: string; src: string; bounds: { x: number; y: number; width: number; height: number }; naturalWidth: number; naturalHeight: number; opacity: number | null; objectFit: string }>;
 }
 export interface ActualLayout {
+  sampleId?: string;
+  collectedAt?: string;
   collectorVersion?: number;
   coordinateSpace: "root-relative";
   nodes: ActualLayer[];
@@ -163,7 +167,7 @@ export function validateLayout(designInput: unknown, actual: ActualLayout, toler
     scope: "automated geometry, image references/placement/pixel dimensions, clipping, opacity, ordinary corner radii, text metrics/colors and linear gradient direction/stops/paint box only; not full visual or interaction acceptance",
     collectorCompatible, requiredCollectorVersion: COLLECTOR_VERSION,
     visualAcceptance: "not-verified", reviewRequired,
-    sourceCoverage: design.meta.exporterVersion === "3.4.1" ? "v3.4" : "legacy export: newly added properties may be absent; re-export for full property coverage",
+    sourceCoverage: design.meta.sourceMode === "pen" ? `Pen ${design.meta.sourceVersion ?? "2.x"} normalized export` : design.meta.exporterVersion === "3.4.1" ? "Figma v3.4" : "legacy Figma export: newly added properties may be absent; re-export for full property coverage",
     tolerance, total: layers.length, matched: layers.length - failed.length,
     missing, duplicates, unexpected, environmentReady,
     stable: actual.stable, fontsReady: actual.fontsReady, brokenImages: actual.brokenImages ?? [],
@@ -179,6 +183,8 @@ export async function collectLayout(): Promise<ActualLayout> {
   await document.fonts.ready;
   await Promise.all(Array.from(document.images).map((img) => img.decode().catch(() => {})));
   function sample() {
+    const flowBox = (css: CSSStyleDeclaration) => ({ display: css.display, position: css.position, cssFloat: css.cssFloat,
+      insets: [css.top, css.right, css.bottom, css.left], margins: [css.marginTop, css.marginRight, css.marginBottom, css.marginLeft], transform: css.transform, translate: css.translate });
     return Array.from(document.querySelectorAll<HTMLElement>("[data-d2c-id]")).map((element) => {
       const root = element.closest<HTMLElement>("[data-d2c-root]");
       const box = element.getBoundingClientRect(), origin = root?.getBoundingClientRect();
@@ -191,10 +197,12 @@ export async function collectLayout(): Promise<ActualLayout> {
         return size + sides.reduce((sum, v) => sum + (number(v) ?? 0), 0);
       };
       const wrapperEffects: string[] = [];
+      const flowWrappers: ReturnType<typeof flowBox>[] = [];
       // Only intermediate wrappers inside a selection root are part of this
       // contract; the page hosting separate selection roots is not a design node.
       if (element !== root) for (let wrapper = element.parentElement; wrapper && !wrapper.hasAttribute("data-d2c-id"); wrapper = wrapper.parentElement) {
         const css = getComputedStyle(wrapper);
+        flowWrappers.push(flowBox(css));
         for (const prop of ["overflowX", "overflowY", "clipPath", "maskImage", "filter", "backdropFilter", "mixBlendMode", "opacity", "contain"] as const) {
           const value = css[prop];
           const unsafe = prop === "opacity" ? Number(value) !== 1 : prop === "contain" ? /\b(paint|strict|content)\b/.test(value) : !!value && !["visible", "none", "normal"].includes(value);
@@ -220,6 +228,7 @@ export async function collectLayout(): Promise<ActualLayout> {
         parentId: element === root ? null : element.parentElement?.closest<HTMLElement>("[data-d2c-id]")?.dataset.d2cId ?? null,
         bounds: { x: box.x - (origin?.x ?? 0), y: box.y - (origin?.y ?? 0), width: box.width, height: box.height }, visible,
         tagName: element.tagName, imageSources, assetImages,
+        flowStyle: { ...flowBox(computed), wrappers: flowWrappers },
         renderStyle: { backgroundImage: computed.backgroundImage, backgroundOrigin: computed.backgroundOrigin, backgroundClip: computed.backgroundClip, backgroundSize: computed.backgroundSize, backgroundPosition: computed.backgroundPosition, opacity: number(computed.opacity), position: computed.position, overflowX: computed.overflowX, overflowY: computed.overflowY, clipPath: computed.clipPath, maskImage: computed.maskImage, contain: computed.contain, borderBoxWidth: dimension("width"), borderBoxHeight: dimension("height"), cornerRadii: [computed.borderTopLeftRadius, computed.borderTopRightRadius, computed.borderBottomRightRadius, computed.borderBottomLeftRadius], wrapperEffects },
         textStyle: { color: computed.color, textFillColor: computed.webkitTextFillColor || computed.color, fontSize: number(computed.fontSize), lineHeight: computed.lineHeight === "normal" ? null : number(computed.lineHeight), fontWeight: number(computed.fontWeight), fontStyle: computed.fontStyle, letterSpacing: computed.letterSpacing === "normal" ? 0 : number(computed.letterSpacing), textAlign: computed.textAlign, direction: computed.direction, textDecorationLine: computed.textDecorationLine },
       };
@@ -234,7 +243,7 @@ export async function collectLayout(): Promise<ActualLayout> {
     previous = nodes;
   }
   return {
-    collectorVersion: 4, coordinateSpace: "root-relative", nodes, stable, fontsReady: document.fonts.status === "loaded",
+    collectorVersion: 5, sampleId: Array.from(crypto.getRandomValues(new Uint32Array(4)), n => n.toString(16).padStart(8, "0")).join(""), collectedAt: new Date().toISOString(), coordinateSpace: "root-relative", nodes, stable, fontsReady: document.fonts.status === "loaded",
     brokenImages: Array.from(document.images).filter((img) => !img.complete || !img.naturalWidth).map((img) => img.currentSrc || img.src),
     viewport: { width: innerWidth, height: innerHeight, devicePixelRatio },
   };

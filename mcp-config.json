@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "figma-json-exporter": {
-      "description": "Figma JSON Exporter - 导出 Figma 选中节点的结构数据",
+      "description": "Figma JSON Exporter - 导出 Figma 选区或 Pen 节点并校验",
       "command": "node",
       "args": ["/Users/wangzihan11/code/self/figma-json-exporter/dist/mcp-server.js"]
     }

@@ -1,6 +1,6 @@
 # Figma JSON Exporter
 
-Figma 选区导出插件和本地 MCP Server。MCP 完全使用 TypeScript 实现，预先编译、打包为 `dist/mcp-server.js`，运行时只需要 Node.js 22 或更高版本，不调用 Go、TypeScript 编译器或包管理器。
+Figma 选区与 Pen `.pen` 设计稿导出工具和本地 MCP Server。MCP 名称及三个工具名保持不变。MCP 完全使用 TypeScript 实现，预先编译、打包为 `dist/mcp-server.js`，运行时只需要 Node.js 22 或更高版本，不调用 Go、TypeScript 编译器或包管理器。
 
 ## 构建
 
@@ -36,9 +36,9 @@ node /absolute/path/to/figma-json-exporter/dist/mcp-server.js
 }
 ```
 
-- `figma_status`：检查 Figma 插件连接状态。
-- `figma_export`：先将图片写入本地，再返回当前选区的可见节点 JSON 和文件路径。
-- `figma_validate_layout`：将浏览器实测矩形与设计 JSON 比较，返回逐层偏差及完整报告路径。
+- `figma_status`：默认检查 Figma 插件；传 `mode: "pen"` 时检查本地 `.pen` 文件并列出顶层节点。
+- `figma_export`：默认导出 Figma 当前选区；传 `mode: "pen"` 时导出 `.pen` 文件中的指定节点。两种模式都先将图片写入本地，再返回可见节点 JSON 和文件路径。
+- `figma_validate_layout`：将浏览器实测矩形与设计 JSON 比较，返回逐层偏差及完整报告路径；可用 `mode` 断言设计来源。
 
 如需 Streamable HTTP，先在本机启动：
 
@@ -58,6 +58,33 @@ node dist/mcp-server.js --transport=http
 
 插件需要保留 `manifest.json`、`code.js` 和 `ui.html`。UI 的“启动”按钮只重新检测和连接服务；本地进程由 JS 入口启动。“关闭”会停止共享服务，再次启动 stdio 客户端时重新检活和启动。
 
+## Pen 模式（工具名不变）
+
+Pen 模式直接读取本地 `.pen` JSON，不依赖 Figma 插件，也不要求 Pen 编辑器常驻。Agent 先从 Pen/Pencil 获取当前文件路径和选中节点 ID，再调用现有工具：
+
+```json
+{ "mode": "pen", "penPath": "/absolute/path/design.pen" }
+```
+
+```json
+{
+  "mode": "pen",
+  "penPath": "/absolute/path/design.pen",
+  "nodeIds": ["screen-id"],
+  "outputDir": "/absolute/path/exports"
+}
+```
+
+省略 `nodeIds` 时导出全部非 reusable 顶层节点。当前编辑器选区是瞬时状态，静态服务无法从文件本身推断，因此必须由 Agent 将选中 ID 传给 `nodeIds`，不能把“当前选区”解释为猜测某个画板。
+
+适配器支持 Pen 2.x JSON、默认/节点主题变量、文件内组件实例及 descendants 覆盖、固定布局、横向/纵向 Auto Layout、`fit_content`/`fill_container`、隐藏/零透明节点过滤、文字、图片填充、颜色、线性渐变、裁剪、透明度、圆角、描边和效果。图片 URL 必须是相对 `.pen` 文件的本地路径，导出时复制到 bundle；PNG/JPEG/GIF/WebP/SVG 均可作为图片填充。
+
+静态读取不能可靠执行 script、外部 imports、字体排版引擎或所有动态尺寸。遇到无法确定的节点会直接报错，不发布不可靠结果。Agent 可先用 Pen 引擎读取准确的绝对包围盒，再通过 `penBounds: [{"id":"...","x":0,"y":0,"width":100,"height":100}]` 传入；旋转或动态节点必须提供对应矩形。`penBounds` 是源引擎计算结果，不是让 Agent 按截图估算坐标。
+
+组合形状、特殊字体、角向/径向/网格渐变等需要 Pen 引擎完成最终渲染。Agent 先从 Pen 导出对应节点 PNG，再传 `penRasters: [{"id":"node-id","path":"/absolute/node.png","scale":1,"bounds":{"id":"node-id","x":0,"y":0,"width":100,"height":100}}]`。`bounds` 可覆盖包含 outside 描边、阴影或模糊的图片画布；必须包住节点布局框，PNG 像素尺寸必须等于 `bounds × scale`。这类节点在统一 JSON 中标为原子图片，子形状不会重复生成 DOM。没有可靠栅格图时，复杂渐变会明确失败，不会静默丢失。
+
+导出后的实现和校验流程与 Figma 相同：读取 `design.json`/`implementation.json`，运行浏览器采集器，调用 `figma_validate_layout` 完成 baseline，再按 `flow-plan.json` 重排并执行 flow。可以在校验参数中传 `mode: "pen"`；如果它与 `design.json` 的来源不一致，校验会拒绝执行。
+
 ## 默认过滤规则
 
 手动 JSON/ZIP 导出和 MCP 导出共用相同逻辑：
@@ -71,7 +98,46 @@ node dist/mcp-server.js --transport=http
 
 过滤不修改设计稿。这是按节点属性过滤，不做像素可见性判断，不会推测遮挡、裁剪或屏幕外节点是否应被删除。
 
-## v3.4：图片先落盘，JSON 后返回
+## v3.5：先还原验收，再按文档流重构验收
+
+MCP 默认要求两个阶段，导出的绝对坐标只是比较依据，不要求最终 HTML 全部使用绝对定位：
+
+1. **baseline**：完成第一版还原，实测全部图层的几何、样式和图片。`passed: true` 只表示首轮通过，此时 `workflowComplete: false`，不能结束任务。
+2. **文档流重构**：Agent 保存可回退的首版，读取 `flow-plan.json`，从父容器开始用 Flex/Grid/块布局重构真实页面。优先使用源设计 Auto Layout 的方向、padding、gap 和尺寸规则；普通组由 Agent 判断行列关系。保留图层 ID 和设计层级，可增加不带 ID 的布局包装层，不得通过删层或更改目标坐标规避校验。
+3. **flow**：重新运行采集器，在与首轮相同的视口和 DPR 下提交新数据，并引用首轮成功报告。再次执行原有全部几何/样式校验，同时检查文档流约束。失败就调整页面、重新采集并重试；只有 `workflowComplete: true` 表示两个自动阶段均通过。
+
+Agent 调用示例（路径替换为实际文件）：
+
+```json
+{
+  "designPath": "/.../design.json",
+  "actualPath": "/.../baseline-actual.json",
+  "phase": "baseline"
+}
+```
+
+拿到成功的 `reportPath`，重构并重新采集后，再调用同一个 `figma_validate_layout`：
+
+```json
+{
+  "designPath": "/.../design.json",
+  "actualPath": "/.../flow-actual.json",
+  "phase": "flow",
+  "baselineReportPath": "/.../successful-baseline-report.json"
+}
+```
+
+第二轮不能省略成功基线，不能引用另一份设计或已修改的设计文件，不能复用基线采样 ID 或提交早于基线通过时间的采样。省略第二轮 tolerance 时继承基线容差，显式指定时不能放宽。保存的基线会重新做自动检查；这些检查防止流程误用，不是浏览器采样来源的密码学证明，也不能替代真实测量。
+
+**文档流约定**：普通内容及选区内的匿名包装层不能使用 absolute/fixed、float、非零 relative 偏移、负 margin 或 translate/矩阵平移来拼坐标；static、无偏移 relative、sticky，以及 Flex/Grid/块布局可用。这是本工具的保守实现约定，不表示 CSS 中这些特性都不合法。[CSS 定位与正常流](https://www.w3.org/TR/css-position-3/)
+
+图片内部为保留外描边/阴影而设置的 IMG 绝对偏移不受文档流限制，带 `data-d2c-id` 的外层仍需参与文档流。源设计明确 `layoutPositioning: ABSOLUTE` 的非根节点或叶子形状可通过 `flowExceptions: [{"id":"...","reason":"具体叠加用途"}]` 逐项说明例外；普通文本/容器不允许任意豁免，匿名包装层也不随例外豁免。例外会列为待复核，不能把整页都标成例外。
+
+新增报告字段：`phase`、`workflowComplete`、`baselineReportPath`、`flowMismatches`、`flowExceptions`。首轮通过后的 `nextAction` 会明确要求重构并进行第二轮。自动验收仍不证明像素、响应式行为、交互或代码质量；MCP 负责约束和比较，HTML/CSS 修改与浏览器执行由 Agent 完成，不会自行重写用户页面。
+
+本次服务版本为 **3.6.0**，新增 Pen 模式；Figma 插件仍兼容 **3.4.1**。必须使用新导出包中的 **collectorVersion: 5** 采集器（包含 `sampleId`、`collectedAt` 和 `flowStyle`）。旧导出包应重新获取新版采集器并重跑基线。升级后需重启共享服务，并重新连接客户端 MCP；已有 stdio 进程中的工具参数和校验代码不会随磁盘构建自动更新。
+
+## 图片先落盘，JSON 后返回
 
 调用 `figma_export`，可传入 `outputDir`（绝对路径）和 `shapeGroupsAsImages`（默认 `true`）。每次导出新建一个目录，不覆盖已有文件：
 
@@ -81,6 +147,7 @@ export-<uuid>/
   design.json              完整图层树、资源清单和坐标
   layout.json              逐层坐标表及属性检查/复核清单
   implementation.json      逐层实现规则、自动检查和待视觉复核项
+  flow-plan.json           两阶段流程、文档流重构建议和例外候选
   collect-layout.js        页面可加载的 DOM 采集器
   collector-expression.js  浏览器工具可执行的采集表达式
 ```
@@ -198,7 +265,7 @@ Figma 的 `absoluteRenderBounds` 允许为 `null`，不能仅凭此认定图层�
 
 | 字段 | 坐标空间 | 用途 |
 | --- | --- | --- |
-| `absoluteBounds` | Figma 画布绝对坐标 | 原始依据；优先读取 `absoluteBoundingBox`，保留小数 |
+| `absoluteBounds` | 设计画布绝对坐标 | Figma 优先读取 `absoluteBoundingBox`；Pen 使用静态布局或显式 `penBounds`，均保留小数 |
 | `relativeBounds` | 减去各自选区根节点的绝对原点 | 与浏览器结果比较 |
 | `localBounds` | 减去父节点绝对包围盒原点 | 定位父子层级误差 |
 
@@ -206,11 +273,12 @@ Figma 的 `absoluteRenderBounds` 允许为 `null`，不能仅凭此认定图层�
 
 Agent 应按以下顺序执行：
 
-1. 在 Figma 选择完整画板并打开插件，调用 `figma_export`。先读取 `design.json`、`implementation.json` 和资源；逐层落实 `implementation.checks/rules`，处理 `review` 中的未验证属性。不能只读坐标表，也不能用字符或猜测图标替代已导出的图片。
-2. 实现时为**每个导出图层**标记 `data-d2c-id="Figma ID"`，选区根节点额外标记 `data-d2c-root`。保留导出层级；非设计结构的包装元素可不加 ID。原子图片的布局容器带图层 ID，内部 IMG 标记 `data-d2c-asset="assetId"` 并使用 `imagePlacement`，不再给 IMG 添加另一份图层 ID。
+1. Figma 模式在 Figma 选择完整画板并打开插件；Pen 模式从编辑器取得 `.pen` 路径和选中节点 ID。调用同名 `figma_export`，先读取 `design.json`、`implementation.json` 和资源；逐层落实 `implementation.checks/rules`，处理 `review` 中的未验证属性。不能只读坐标表，也不能用字符或猜测图标替代已导出的图片。
+2. 实现时为**每个导出图层**标记 `data-d2c-id="源图层 ID"`，选区根节点额外标记 `data-d2c-root`。保留导出层级；非设计结构的包装元素可不加 ID。原子图片的布局容器带图层 ID，内部 IMG 标记 `data-d2c-asset="assetId"` 并使用 `imagePlacement`，不再给 IMG 添加另一份图层 ID。
 3. 用实际浏览器加载页面，等待字体、图片和稳定布局。执行 `collector-expression.js` 的内容，或加载 `collect-layout.js` 后调用 `await window.collectFigmaLayout()`，保存返回值为 `actual-layout.json`。
-4. 调用 `figma_validate_layout({ designPath: "/.../design.json", actualPath: "/.../actual-layout.json", tolerance: 1 })`。也可直接传 `actual` 对象，两种方式二选一。
+4. 调用 `figma_validate_layout({ designPath: "/.../design.json", actualPath: "/.../actual-layout.json", phase: "baseline", tolerance: 1 })`。也可直接传 `actual` 对象，两种方式二选一。
 5. 按报告先修父级，再修子级，修改实际页面代码、重新渲染和采集，然后再次校验。默认六项边界/尺寸误差均不超过 **1 CSS px**；缺失/重复/多余 ID、层级错误、隐藏实现、图片失败、未稳定布局均不能通过。
+6. 基线通过后按 `flow-plan.json` 重构为文档流，重新采集，用 `phase: "flow"` 和成功的 `baselineReportPath` 再验收；继续修正直到 `workflowComplete: true`。随后完成独立视觉和交互复核。
 
 采集器只读，不修改页面；读取真实 `getBoundingClientRect()` 和 `getComputedStyle()`，减去浏览器中根节点的矩形原点，因此页面居中、页面滚动不会直接造成整体偏差。多选根节点分别归一化；验证的是每个选区内部布局，不校验不同选区在页面之间的排布。**不要使用 CSS zoom/整体缩放来适配验收视口**，因为缩放后的矩形会改变尺寸。
 
@@ -220,7 +288,7 @@ v3.1 还检查显式行高和图片引用：
 
 - 对非栅格化文字读取浏览器计算行高，与 PIXELS 或 `fontSize × PERCENT / 100` 比较，报告 `line-height-mismatch`。
 - 对图片节点检查实际 `IMG` 及资源文件名；对普通图片填充检查实际 CSS 背景引用，报告 `image-missing-or-wrong-source`。复制资源时保留导出的文件名，便于跨目录核对。当前引用校验针对文件 URL，不支持将图片改名或改为 data URI 后仍声称引用通过。
-- 必须运行新版采集器，它会返回 `collectorVersion: 4`、`tagName`、`imageSources`、`assetImages`、`textStyle` 和 `renderStyle`（含渐变背景样式）。旧采集器或缺失属性采样的结果不能通过。
+- 必须运行新版采集器，它会返回 `collectorVersion: 5`、`sampleId`、`collectedAt`、`flowStyle`、`tagName`、`imageSources`、`assetImages`、`textStyle` 和 `renderStyle`（含渐变背景样式）。旧采集器或缺失属性采样的结果不能通过。
 
 引用检查不是浏览器端内容哈希或像素校验：同名文件被替换、背景图片网络失败、遮挡等还需另行验证，不能将它当作完整视觉验收。
 

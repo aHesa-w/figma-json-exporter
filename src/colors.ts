@@ -3,6 +3,14 @@
 export function parseCSSColor(input: string | undefined): number[] | null {
   if (!input) return null;
   if (input === "transparent") return [0, 0, 0, 0];
+  const hex = /^#([0-9a-f]{3,8})$/i.exec(input.trim());
+  if (hex) {
+    let raw = hex[1];
+    if (raw.length === 3 || raw.length === 4) raw = [...raw].map(char => char + char).join("");
+    if (raw.length === 6) raw += "ff";
+    if (raw.length !== 8) return null;
+    return [0, 2, 4, 6].map(offset => Number.parseInt(raw.slice(offset, offset + 2), 16) / 255);
+  }
   const match = /^rgba?\(([^)]+)\)$/.exec(input.trim());
   if (!match) return null;
   const parts = match[1].trim().split(/[\s,/]+/);

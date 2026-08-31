@@ -8,10 +8,28 @@ const finite = (n: unknown): n is number => typeof n === "number" && Number.isFi
 const rounded = (n: number) => Number(n.toFixed(6));
 const visible = (paint: Record<string, unknown>) => paint.visible !== false && paint.opacity !== 0;
 export function hasGradient(node: Layer): boolean {
-  return [node.fills, node.strokes].some((paints) => Array.isArray(paints) && paints.some((p) => visible(p) && String(p.type).startsWith("GRADIENT")));
+  if (node.sourceGradient) return true;
+  return [node.fills, node.strokes].some((paints) => Array.isArray(paints) && paints.some((p) => visible(p) && String(p.type).includes("GRADIENT")));
 }
 
 export function linearGradient(node: Layer) {
+  const pen = node.sourceGradient as { gradientType?: string; rotation?: number; opacity?: number; unsupportedComposition?: boolean; center?: { x?: number; y?: number }; size?: { width?: number; height?: number }; colors?: Array<{ color: string; position: number }> } | undefined;
+  if (pen) {
+    if (pen.unsupportedComposition || (pen.gradientType ?? "linear") !== "linear" || (pen.center && (pen.center.x !== 0.5 || pen.center.y !== 0.5)) || (pen.size && pen.size.height !== undefined && pen.size.height !== 1) || !Array.isArray(pen.colors) || pen.colors.length < 2) return null;
+    const opacity = pen.opacity ?? 1;
+    if (!finite(opacity) || opacity < 0 || opacity > 1) return null;
+    const stops: Stop[] = [];
+    for (const item of pen.colors) {
+      const color = parseCSSColor(item.color);
+      if (!color || !finite(item.position) || item.position < 0 || item.position > 1) return null;
+      color[3] *= opacity;
+      if (stops.length && item.position * 100 < stops[stops.length - 1].position) return null;
+      stops.push({ position: item.position * 100, color });
+    }
+    const angleDeg = normalize(-(pen.rotation ?? 0));
+    const css = `linear-gradient(${rounded(angleDeg)}deg, ${stops.map((stop) => `rgba(${stop.color.slice(0, 3).map((v) => rounded(v * 255)).join(",")},${stop.color[3]}) ${rounded(stop.position)}%`).join(", ")})`;
+    return { angleDeg, stops, css, coordinateSpace: "node-local", backgroundOrigin: "border-box", backgroundClip: "border-box", backgroundSize: "100% 100%", backgroundPosition: "0% 0%", backgroundRepeat: "no-repeat" };
+  }
   if (node.renderAs === "image" || !Array.isArray(node.fills)) return null;
   const paints = node.fills.filter(visible);
   const paint = paints[0];
@@ -100,7 +118,7 @@ export function validateGradient(node: Layer, style: RenderStyle | undefined): P
   if (node.renderAs === "image" || !hasGradient(node)) return [];
   const target = linearGradient(node), issues: PropertyMismatch[] = [];
   const fail = (property: string, expected: unknown, actual: unknown) => issues.push({ property, expected, actual: actual ?? null });
-  if (!target || (Array.isArray(node.strokes) && node.strokes.some((p) => visible(p) && String(p.type).startsWith("GRADIENT")))) {
+  if (!target || (Array.isArray(node.strokes) && node.strokes.some((p) => visible(p) && String(p.type).includes("GRADIENT")))) {
     fail("gradient-unsupported", "Export complex gradients as an image; do not silently skip direction checks", null); return issues;
   }
   const actual = parseLinearGradient(style?.backgroundImage, style?.borderBoxWidth ?? 0, style?.borderBoxHeight ?? 0);
