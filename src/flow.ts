@@ -1,4 +1,5 @@
 import { flattenLayers, prepareDesign, type ActualLayout, type Layer } from "./geometry.js";
+import { semanticPlan } from "./semantics.js";
 
 export interface FlowBox {
   display: string; position: string; cssFloat: string;
@@ -11,7 +12,7 @@ export interface ValidationOptions {
   baselineReportPath?: string;
   flowExceptions?: FlowException[];
 }
-export const WORKFLOW_INSTRUCTIONS = "Two required stages: validate baseline geometry/styles first (phase=baseline). After it passes, refactor the real page into normal document flow using flex/grid/block, preserve layer IDs and design hierarchy, and remeasure at the SAME viewport. Then call phase=flow with baselineReportPath from the successful baseline. Do not reuse baseline measurements, relax tolerance, delete layers or edit design targets. Only workflowComplete=true completes the automated workflow; visual review remains separate. Absolute coordinates are reference measurements, not a requirement to implement absolute positioning. Raster asset IMG offsets are exempt; their ID-bearing layout wrappers must participate in flow.";
+export const WORKFLOW_INSTRUCTIONS = "Two required stages: validate baseline geometry/styles first (phase=baseline). After it passes, refactor the real page into normal document flow using the lightest suitable primitive (block, then inline/inline-block, then flex, then grid), preserve layer IDs and design hierarchy, and remeasure at the SAME viewport. Flex is reserved for dynamic distribution, fill/stretch or wrapping; grid is reserved for genuine two-dimensional alignment or paint stacks. Then call phase=flow with baselineReportPath from the successful baseline. Do not reuse baseline measurements, relax tolerance, delete layers or edit design targets. Only workflowComplete=true completes the automated workflow; visual review remains separate. Absolute coordinates are reference measurements, not a requirement to implement absolute positioning. Raster asset IMG offsets are exempt; their ID-bearing layout wrappers must participate in flow.";
 
 function exceptionCandidate(node: Layer): boolean {
   if (node.id === node.rootId) return false;
@@ -20,20 +21,25 @@ function exceptionCandidate(node: Layer): boolean {
 
 export function flowPlan(input: unknown) {
   const nodes = flattenLayers(prepareDesign(input));
+  const semanticContainers = new Map(semanticPlan(input).containers.map(container => [container.id, container]));
   return {
     instructions: WORKFLOW_INSTRUCTIONS,
     stages: ["baseline", "flow"],
     rules: [
       "Save a working baseline before refactoring; adjust parent containers first, then children. Iterate on actual HTML/CSS until both layout and style checks pass again.",
-      "Use source Auto Layout direction, padding, gap and sizing where available. Otherwise infer rows/columns/groups and choose flex/grid/block; coordinates alone do not determine a unique flow layout.",
-      "Keep data-d2c-id and the nearest labelled parent. Anonymous flex/grid wrappers may group siblings but must not introduce out-of-flow positioning or visual effects.",
+      "Use block flow for ordinary vertical structure and inline/inline-block for simple horizontal content. Promote to flex only for dynamic distribution, fill/stretch or wrap; promote to grid only for two-dimensional alignment or paint stacks.",
+      "Source Auto Layout is evidence about order, padding, gap and sizing, not an instruction to always emit display:flex. Coordinates alone do not determine a unique flow layout.",
+      "Keep data-d2c-id and the nearest labelled parent. Anonymous structural wrappers must have a semantic role and must not introduce out-of-flow positioning or visual effects.",
       "Normal content uses static/relative/sticky positioning. No absolute/fixed wrappers, floats, nonzero relative insets, negative margins or translation tricks to fake document flow.",
       "Exceptions need explicit per-layer reasons and are limited to source ABSOLUTE children or leaf shapes. They remain pending visual review, never blanket exemptions for containers or text.",
       "Recheck original geometry, clipping, gradients, text, opacity and assets at the baseline viewport. Responsive behavior and source-code quality require separate review.",
     ],
     containers: nodes.filter(n => n.children?.length).map(n => {
       const auto = n.autoLayout as Record<string, unknown> | undefined;
-      return { id: n.id, children: n.children!.map(c => c.id), suggestion: auto ? { display: "flex", direction: auto.mode === "HORIZONTAL" ? "row" : "column", source: "Design Auto Layout", autoLayout: auto } : { display: "block/flex/grid", source: "Agent must infer grouping; do not mechanically convert x/y to margins" } };
+      const semantics = semanticContainers.get(n.id);
+      const wrappedRow = auto?.mode === "HORIZONTAL" && auto?.layoutWrap === "WRAP";
+      const fallback = auto?.mode === "HORIZONTAL" ? (wrappedRow ? "flex-row" : "inline-flow") : "block-flow";
+      return { id: n.id, children: n.children!.map(c => c.id), suggestion: { preferred: semantics?.layoutStrategy.preferred ?? fallback, necessity: semantics?.layoutStrategy.necessity ?? (wrappedRow ? "required" : "lightweight-default"), reason: semantics?.layoutStrategy.reason ?? (wrappedRow ? "Source layout explicitly wraps horizontally" : "Prefer the lightest one-dimensional flow"), source: auto ? "Design Auto Layout plus exported geometry" : "Exported geometry and semantic grouping", autoLayout: auto } };
     }),
     exceptionCandidates: nodes.filter(exceptionCandidate).map(n => ({ id: n.id, type: n.type, automaticApproval: false })),
   };

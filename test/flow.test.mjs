@@ -29,11 +29,12 @@ async function files(t, d = design()) {
 }
 async function fresh() { await delay(3); return actual(); }
 
-test("flow plan uses Auto Layout and preserves the two-stage gate", () => {
+test("flow plan uses lightweight layout strategy and preserves the two-stage gate", () => {
   const d = design(); d.nodes[0].autoLayout = { mode: "HORIZONTAL", itemSpacing: 10, layoutWrap: "WRAP" };
   const plan = flowPlan(d);
   assert.deepEqual(plan.stages, ["baseline", "flow"]);
-  assert.equal(plan.containers[0].suggestion.direction, "row");
+  assert.equal(plan.containers[0].suggestion.preferred, "flex-row");
+  assert.equal(plan.containers[0].suggestion.necessity, "required");
   assert.equal(plan.containers[0].suggestion.autoLayout.itemSpacing, 10);
   assert.deepEqual(plan.exceptionCandidates, []);
 });

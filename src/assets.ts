@@ -4,6 +4,8 @@ import { homedir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { COLLECTOR_VERSION, collectLayout, flattenLayers, prepareDesign, rect, validateLayout, type ActualLayout } from "./geometry.js";
 import { flowPlan, validateFlow, WORKFLOW_INSTRUCTIONS, type ValidationOptions } from "./flow.js";
+import { semanticPlan, SEMANTIC_INSTRUCTIONS } from "./semantics.js";
+import { stylePlan, STYLE_INSTRUCTIONS } from "./styles.js";
 
 export interface PenBounds { id: string; x: number; y: number; width: number; height: number }
 export interface PenRaster { id: string; path: string; scale?: number; bounds?: PenBounds }
@@ -83,12 +85,16 @@ export async function persistExport(input: unknown, assets: Map<string, Buffer>,
     design.meta.layoutPath = join(directory, "layout.json");
     design.meta.implementationPath = join(directory, "implementation.json");
     design.meta.flowPlanPath = join(directory, "flow-plan.json");
+    design.meta.semanticPlanPath = join(directory, "semantic-plan.json");
+    design.meta.stylePlanPath = join(directory, "style-plan.json");
     design.meta.collectorPath = join(directory, "collect-layout.js");
     design.meta.collectorExpressionPath = join(directory, "collector-expression.js");
     design.meta.validation = { attribute: "data-d2c-id", rootAttribute: "data-d2c-root", coordinateSpace: "root-relative", tolerance: 1, required: true, collectorVersion: COLLECTOR_VERSION, propertyChecksRequired: true, visualReviewRequired: true, phases: ["baseline", "flow"], instructions: WORKFLOW_INSTRUCTIONS };
     await writeFile(join(staging, "layout.json"), JSON.stringify(layers.map(({ id, name, type, parentId, rootId, depth, absoluteBounds, relativeBounds, localBounds, renderAs, assetId, imageBounds, imagePlacement, relativeImageBounds, imageBoundsSource, gradient, implementation }) => ({ id, name, type, parentId, rootId, depth, absoluteBounds, relativeBounds, localBounds, renderAs, assetId, imageBounds, imagePlacement, relativeImageBounds, imageBoundsSource, gradient, implementation })), null, 2));
     await writeFile(join(staging, "flow-plan.json"), JSON.stringify(flowPlan(design), null, 2));
-    await writeFile(join(staging, "implementation.json"), JSON.stringify({ workflow: WORKFLOW_INSTRUCTIONS, instructions: "Read design.json for source values. Follow each layer's rules and checks; never silently drop properties. Review items are NOT automatically verified. passed=true only covers automated checks, not full visual acceptance.", layers: layers.map(({ id, name, implementation }) => ({ id, name, ...implementation })) }, null, 2));
+    await writeFile(join(staging, "semantic-plan.json"), JSON.stringify(semanticPlan(design), null, 2));
+    await writeFile(join(staging, "style-plan.json"), JSON.stringify(stylePlan(design), null, 2));
+    await writeFile(join(staging, "implementation.json"), JSON.stringify({ workflow: WORKFLOW_INSTRUCTIONS, semantics: SEMANTIC_INSTRUCTIONS, styles: STYLE_INSTRUCTIONS, instructions: "Read design.json for source values. Follow each layer's rules and checks; never silently drop properties. Review items are NOT automatically verified. passed=true only covers automated checks, not full visual acceptance.", layers: layers.map(({ id, name, implementation }) => ({ id, name, ...implementation })) }, null, 2));
     await writeFile(join(staging, "collect-layout.js"), `window.collectFigmaLayout = ${collectLayout.toString()};\n`);
     await writeFile(join(staging, "collector-expression.js"), `(${collectLayout.toString()})()`);
     await writeFile(join(staging, "design.json"), JSON.stringify(design, null, 2));

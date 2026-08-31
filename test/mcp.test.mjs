@@ -69,7 +69,7 @@ test("standalone compiled entry auto-starts shared service; stdio and HTTP expos
   const f = await fixture(t);
   const stdio = await f.client();
   const http = await f.client("http");
-  assert.equal((await (await fetch(f.base + "/health")).json()).version, "3.6.0");
+  assert.equal((await (await fetch(f.base + "/health")).json()).version, "3.7.0");
   for (const client of [stdio, http]) {
     assert.deepEqual((await client.listTools()).tools.map((tool) => tool.name).sort(), ["figma_export", "figma_status", "figma_validate_layout"]);
     assert.equal(payload(await client.callTool({ name: "figma_status", arguments: {} })).connected, false);
@@ -320,6 +320,12 @@ test("MCP returns real local image paths only after bytes are written, and valid
   assert.equal(layout.find(n => n.id === "photo").imageBoundsSource, "isolated-clone");
   const plan = JSON.parse(await readFile(saved.meta.flowPlanPath, "utf8"));
   assert.deepEqual(plan.stages, ["baseline", "flow"]);
+  const semantic = JSON.parse(await readFile(saved.meta.semanticPlanPath, "utf8"));
+  assert.equal(semantic.summary.containerCount, 1);
+  assert.match(semantic.instructions, /semantic-plan\.json/);
+  const styles = JSON.parse(await readFile(saved.meta.stylePlanPath, "utf8"));
+  assert.equal(styles.outputContract.cssFileRequired, true);
+  assert.equal(styles.outputContract.staticInlineStyles, "forbidden");
   for (const asset of Object.values(saved.assets)) { await access(asset.path); assert.equal((await readFile(asset.path)).length, asset.byteLength); }
   const measured = { sampleId: "mcp-baseline", collectedAt: new Date().toISOString(), viewport: { width: 1200, height: 900, devicePixelRatio: 1 }, collectorVersion: 5, coordinateSpace: "root-relative", stable: true, fontsReady: true, brokenImages: [], nodes: [saved.nodes[0], ...saved.nodes[0].children].map((n) => ({ id: n.id, rootId: n.rootId, parentId: n.parentId, visible: true, bounds: n.relativeBounds, tagName: n.assetId ? "IMG" : "DIV", imageSources: n.assetId ? [saved.assets[n.assetId].path] : [], textStyle: n.type === "TEXT" ? { fontSize: n.fontSize, lineHeight: n.lineHeight.pixels, fontWeight: n.fontWeight, fontStyle: "normal", letterSpacing: 0, textAlign: "left", direction: "ltr", textDecorationLine: "none", color: n.textColor.css, textFillColor: n.textColor.css } : undefined, assetImages: n.assetId ? [{ assetId: n.assetId, src: saved.assets[n.assetId].path, bounds: n.relativeImageBounds, naturalWidth: saved.assets[n.assetId].pixelWidth, naturalHeight: saved.assets[n.assetId].pixelHeight, opacity: 1, objectFit: "fill" }] : [], renderStyle: renderStyle(n.id === "root" ? { ...n.gradient, backgroundImage: n.gradient.css, opacity: 0.6, overflowX: "hidden", overflowY: "hidden", cornerRadii: Array(4).fill("12px") } : {}) })) };
   // Synthetic measurements exercise the MCP comparison API, not browser rendering.

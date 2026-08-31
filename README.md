@@ -83,7 +83,7 @@ Pen 模式直接读取本地 `.pen` JSON，不依赖 Figma 插件，也不要求
 
 组合形状、特殊字体、角向/径向/网格渐变等需要 Pen 引擎完成最终渲染。Agent 先从 Pen 导出对应节点 PNG，再传 `penRasters: [{"id":"node-id","path":"/absolute/node.png","scale":1,"bounds":{"id":"node-id","x":0,"y":0,"width":100,"height":100}}]`。`bounds` 可覆盖包含 outside 描边、阴影或模糊的图片画布；必须包住节点布局框，PNG 像素尺寸必须等于 `bounds × scale`。这类节点在统一 JSON 中标为原子图片，子形状不会重复生成 DOM。没有可靠栅格图时，复杂渐变会明确失败，不会静默丢失。
 
-导出后的实现和校验流程与 Figma 相同：读取 `design.json`/`implementation.json`，运行浏览器采集器，调用 `figma_validate_layout` 完成 baseline，再按 `flow-plan.json` 重排并执行 flow。可以在校验参数中传 `mode: "pen"`；如果它与 `design.json` 的来源不一致，校验会拒绝执行。
+导出后的实现和校验流程与 Figma 相同：读取 `design.json`/`implementation.json`/`semantic-plan.json`/`style-plan.json`，运行浏览器采集器，调用 `figma_validate_layout` 完成 baseline，再按 `flow-plan.json` 和语义计划重排并执行 flow。`style-plan.json` 要求最终产物包含实际导入的 CSS 文件，静态布局、视觉样式及图片定位不得留在 `style` 属性中；相同规则需要复用类名，重复声明需要抽取到基础或组件样式。可以在校验参数中传 `mode: "pen"`；如果它与 `design.json` 的来源不一致，校验会拒绝执行。
 
 ## 默认过滤规则
 
@@ -98,12 +98,12 @@ Pen 模式直接读取本地 `.pen` JSON，不依赖 Figma 插件，也不要求
 
 过滤不修改设计稿。这是按节点属性过滤，不做像素可见性判断，不会推测遮挡、裁剪或屏幕外节点是否应被删除。
 
-## v3.5：先还原验收，再按文档流重构验收
+## v3.7：先还原验收，再按文档流和语义计划重构
 
 MCP 默认要求两个阶段，导出的绝对坐标只是比较依据，不要求最终 HTML 全部使用绝对定位：
 
 1. **baseline**：完成第一版还原，实测全部图层的几何、样式和图片。`passed: true` 只表示首轮通过，此时 `workflowComplete: false`，不能结束任务。
-2. **文档流重构**：Agent 保存可回退的首版，读取 `flow-plan.json`，从父容器开始用 Flex/Grid/块布局重构真实页面。优先使用源设计 Auto Layout 的方向、padding、gap 和尺寸规则；普通组由 Agent 判断行列关系。保留图层 ID 和设计层级，可增加不带 ID 的布局包装层，不得通过删层或更改目标坐标规避校验。
+2. **文档流与语义重构**：Agent 保存可回退的首版，读取 `flow-plan.json` 和 `semantic-plan.json`，从父容器开始按 `block → inline/inline-block → flex → grid` 的优先级重构真实页面。普通纵向结构使用块流，简单横向内容使用 inline/inline-block；只有动态分配、fill/stretch、换行时使用 Flex，只有二维对齐或重叠绘制栈时使用 Grid。不得把 Auto Layout 机械转换成 Flex/Grid，也不得用每个子项的 x/y margin 复刻坐标。代码按安全的 `codeOrder` 从上到下、从左到右编排；重叠绘制栈保留设计顺序。框架目标将重复结构改为数据循环，纯 HTML 保留展开 DOM 并加入 `d2c-repeat` 注释；只自动实现 `safe-local` 交互，`callback-only` 不得虚构路由、API 或持久化。保留图层 ID 和设计层级，可增加具有明确结构语义且不带 ID 的包装层，不得通过删层或更改目标坐标规避校验。
 3. **flow**：重新运行采集器，在与首轮相同的视口和 DPR 下提交新数据，并引用首轮成功报告。再次执行原有全部几何/样式校验，同时检查文档流约束。失败就调整页面、重新采集并重试；只有 `workflowComplete: true` 表示两个自动阶段均通过。
 
 Agent 调用示例（路径替换为实际文件）：
@@ -133,9 +133,9 @@ Agent 调用示例（路径替换为实际文件）：
 
 图片内部为保留外描边/阴影而设置的 IMG 绝对偏移不受文档流限制，带 `data-d2c-id` 的外层仍需参与文档流。源设计明确 `layoutPositioning: ABSOLUTE` 的非根节点或叶子形状可通过 `flowExceptions: [{"id":"...","reason":"具体叠加用途"}]` 逐项说明例外；普通文本/容器不允许任意豁免，匿名包装层也不随例外豁免。例外会列为待复核，不能把整页都标成例外。
 
-新增报告字段：`phase`、`workflowComplete`、`baselineReportPath`、`flowMismatches`、`flowExceptions`。首轮通过后的 `nextAction` 会明确要求重构并进行第二轮。自动验收仍不证明像素、响应式行为、交互或代码质量；MCP 负责约束和比较，HTML/CSS 修改与浏览器执行由 Agent 完成，不会自行重写用户页面。
+新增报告字段：`phase`、`workflowComplete`、`baselineReportPath`、`flowMismatches`、`flowExceptions`。首轮通过后的 `nextAction` 会明确要求重构并进行第二轮。`semantic-plan.json` 提供源码编排建议，并不伪装成源码或交互自动验收；自动验收仍不证明像素、响应式行为、完整交互或代码质量。MCP 负责约束和比较，HTML/CSS 修改与浏览器执行由 Agent 完成，不会自行重写用户页面。
 
-本次服务版本为 **3.6.0**，新增 Pen 模式；Figma 插件仍兼容 **3.4.1**。必须使用新导出包中的 **collectorVersion: 5** 采集器（包含 `sampleId`、`collectedAt` 和 `flowStyle`）。旧导出包应重新获取新版采集器并重跑基线。升级后需重启共享服务，并重新连接客户端 MCP；已有 stdio 进程中的工具参数和校验代码不会随磁盘构建自动更新。
+本次服务版本为 **3.7.0**，新增语义代码计划；Figma 插件仍兼容 **3.4.1**。必须使用新导出包中的 **collectorVersion: 5** 采集器（包含 `sampleId`、`collectedAt` 和 `flowStyle`）。旧导出包应重新导出以获得 `semantic-plan.json`。升级后需重启共享服务，并重新连接客户端 MCP；已有 stdio 进程中的工具参数和校验代码不会随磁盘构建自动更新。
 
 ## 图片先落盘，JSON 后返回
 
@@ -148,13 +148,14 @@ export-<uuid>/
   layout.json              逐层坐标表及属性检查/复核清单
   implementation.json      逐层实现规则、自动检查和待视觉复核项
   flow-plan.json           两阶段流程、文档流重构建议和例外候选
+  semantic-plan.json       可读代码顺序、重复结构循环提示和有边界的交互候选
   collect-layout.js        页面可加载的 DOM 采集器
   collector-expression.js  浏览器工具可执行的采集表达式
 ```
 
 节点树还保留填充、描边、效果、圆角、文本、字体、Auto Layout、约束和组件引用。图片字节从 Figma 插件传至本机服务，所有文件写完后才发布目录并返回结果。缺图、读取失败、未知图片格式或写入失败都会使导出失败，不能返回假路径。支持 PNG/JPEG/GIF/WebP 原图；单张图片字节上限 32MB，单次累计 128MB，导出超时 120 秒。
 
-- `meta.schemaVersion = 3`；`meta.designPath`、`meta.layoutPath` 等为本机绝对路径。
+- `meta.schemaVersion = 3`；`meta.designPath`、`meta.layoutPath`、`meta.semanticPlanPath` 等为本机绝对路径。
 - `meta.exporterVersion = "3.4.1"` 标识新版插件已加载；升级后应关闭并重新打开 Figma 插件。服务会拒绝旧插件的导出，避免静默漏掉新增属性与字体/图片处理；旧版 v3 JSON 仍可用于校验诊断。
 - `assets[assetId]` 含 `path`、`relativePath`、`mimeType`、`byteLength`、`sha256`。
 - 普通图片填充的 `imageHash` 对应 `assets[imageHash]`；形状图片节点通过 `assetId` 引用资源。
@@ -273,12 +274,12 @@ Figma 的 `absoluteRenderBounds` 允许为 `null`，不能仅凭此认定图层�
 
 Agent 应按以下顺序执行：
 
-1. Figma 模式在 Figma 选择完整画板并打开插件；Pen 模式从编辑器取得 `.pen` 路径和选中节点 ID。调用同名 `figma_export`，先读取 `design.json`、`implementation.json` 和资源；逐层落实 `implementation.checks/rules`，处理 `review` 中的未验证属性。不能只读坐标表，也不能用字符或猜测图标替代已导出的图片。
+1. Figma 模式在 Figma 选择完整画板并打开插件；Pen 模式从编辑器取得 `.pen` 路径和选中节点 ID。调用同名 `figma_export`，先读取 `design.json`、`implementation.json`、`semantic-plan.json` 和资源；逐层落实 `implementation.checks/rules`，处理 `review` 中的未验证属性。不能只读坐标表，也不能用字符或猜测图标替代已导出的图片。
 2. 实现时为**每个导出图层**标记 `data-d2c-id="源图层 ID"`，选区根节点额外标记 `data-d2c-root`。保留导出层级；非设计结构的包装元素可不加 ID。原子图片的布局容器带图层 ID，内部 IMG 标记 `data-d2c-asset="assetId"` 并使用 `imagePlacement`，不再给 IMG 添加另一份图层 ID。
 3. 用实际浏览器加载页面，等待字体、图片和稳定布局。执行 `collector-expression.js` 的内容，或加载 `collect-layout.js` 后调用 `await window.collectFigmaLayout()`，保存返回值为 `actual-layout.json`。
 4. 调用 `figma_validate_layout({ designPath: "/.../design.json", actualPath: "/.../actual-layout.json", phase: "baseline", tolerance: 1 })`。也可直接传 `actual` 对象，两种方式二选一。
 5. 按报告先修父级，再修子级，修改实际页面代码、重新渲染和采集，然后再次校验。默认六项边界/尺寸误差均不超过 **1 CSS px**；缺失/重复/多余 ID、层级错误、隐藏实现、图片失败、未稳定布局均不能通过。
-6. 基线通过后按 `flow-plan.json` 重构为文档流，重新采集，用 `phase: "flow"` 和成功的 `baselineReportPath` 再验收；继续修正直到 `workflowComplete: true`。随后完成独立视觉和交互复核。
+6. 基线通过后按 `flow-plan.json` 重构为文档流，并按 `semantic-plan.json` 调整源码顺序、重复结构和安全本地交互；重新采集，用 `phase: "flow"` 和成功的 `baselineReportPath` 再验收，继续修正直到 `workflowComplete: true`。随后完成独立视觉和交互复核。
 
 采集器只读，不修改页面；读取真实 `getBoundingClientRect()` 和 `getComputedStyle()`，减去浏览器中根节点的矩形原点，因此页面居中、页面滚动不会直接造成整体偏差。多选根节点分别归一化；验证的是每个选区内部布局，不校验不同选区在页面之间的排布。**不要使用 CSS zoom/整体缩放来适配验收视口**，因为缩放后的矩形会改变尺寸。
 
@@ -331,6 +332,8 @@ src/mcp.ts          MCP 工具定义
 src/bridge.ts       请求排队、关联和 stdio HTTP 桥
 src/assets.ts       图片/JSON 原子落盘和校验报告
 src/geometry.ts     坐标归一化、DOM 采集和逐层比较
+src/flow.ts         文档流计划与第二阶段约束
+src/semantics.ts    可读源码顺序、重复结构和安全交互推断计划
 src/rendering.ts    逐层属性约束、样式比较与视觉复核清单
 dist/mcp-server.js  编译产物，直接用 node 执行
 code.js             Figma 沙箱导出与可见性过滤
