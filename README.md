@@ -1,6 +1,8 @@
 # Figma JSON Exporter
 
-Figma 选区与 Pen `.pen` 设计稿导出工具和本地 MCP Server。MCP 名称及三个工具名保持不变。MCP 完全使用 TypeScript 实现，预先编译、打包为 `dist/mcp-server.js`，运行时只需要 Node.js 22 或更高版本，不调用 Go、TypeScript 编译器或包管理器。
+[English](README.en.md) | 简体中文
+
+Figma 选区与 Pen `.pen` 设计稿导出工具和本地 MCP Server。MCP 名称及 `figma_*` 工具名保持不变。MCP 完全使用 TypeScript 实现，预先编译、打包为 `dist/mcp-server.js`，运行时只需要 Node.js 22 或更高版本，不调用 Go、TypeScript 编译器或包管理器。
 
 ## 构建
 
@@ -38,6 +40,7 @@ node /absolute/path/to/figma-json-exporter/dist/mcp-server.js
 
 - `figma_status`：默认检查 Figma 插件；传 `mode: "pen"` 时检查本地 `.pen` 文件并列出顶层节点。
 - `figma_export`：默认导出 Figma 当前选区；传 `mode: "pen"` 时导出 `.pen` 文件中的指定节点。两种模式都先将图片写入本地，再返回可见节点 JSON 和文件路径。
+- `figma_guidance`：按标签渐进式加载实现/推断标准。传入 `semantic-plan.json` 中容器、重复组、交互候选携带的 `guidanceTags`，或阶段标签（`workflow`/`baseline`/`flow`/`style`）、图层属性标签（`image`/`gradient`/`text`/`clipping`/`mask`/`paint`）或 `subagent`；不传标签时列出全部可用标签。
 - `figma_validate_layout`：将浏览器实测矩形与设计 JSON 比较，返回逐层偏差及完整报告路径；可用 `mode` 断言设计来源。
 
 如需 Streamable HTTP，先在本机启动：
@@ -135,7 +138,7 @@ Agent 调用示例（路径替换为实际文件）：
 
 新增报告字段：`phase`、`workflowComplete`、`baselineReportPath`、`flowMismatches`、`flowExceptions`。首轮通过后的 `nextAction` 会明确要求重构并进行第二轮。`semantic-plan.json` 提供源码编排建议，并不伪装成源码或交互自动验收；自动验收仍不证明像素、响应式行为、完整交互或代码质量。MCP 负责约束和比较，HTML/CSS 修改与浏览器执行由 Agent 完成，不会自行重写用户页面。
 
-本次服务版本为 **3.7.0**，新增语义代码计划；Figma 插件仍兼容 **3.4.1**。必须使用新导出包中的 **collectorVersion: 5** 采集器（包含 `sampleId`、`collectedAt` 和 `flowStyle`）。旧导出包应重新导出以获得 `semantic-plan.json`。升级后需重启共享服务，并重新连接客户端 MCP；已有 stdio 进程中的工具参数和校验代码不会随磁盘构建自动更新。
+本次服务版本为 **3.8.0**：新增 `figma_guidance` 按标签渐进式加载实现/推断标准、tab/input 样式推断，并把「第一版直接文档流」与「grid/flex 必须被 `layoutStrategy` 证明」列为强约束。Figma 插件仍兼容 **3.4.1**。必须使用新导出包中的 **collectorVersion: 5** 采集器（包含 `sampleId`、`collectedAt` 和 `flowStyle`）。旧导出包应重新导出以获得 `semantic-plan.json`。升级后需重启共享服务，并重新连接客户端 MCP；已有 stdio 进程中的工具参数和校验代码不会随磁盘构建自动更新。
 
 ## 图片先落盘，JSON 后返回
 
@@ -148,7 +151,7 @@ export-<uuid>/
   layout.json              逐层坐标表及属性检查/复核清单
   implementation.json      逐层实现规则、自动检查和待视觉复核项
   flow-plan.json           两阶段流程、文档流重构建议和例外候选
-  semantic-plan.json       可读代码顺序、重复结构循环提示和有边界的交互候选
+  semantic-plan.json       可读代码顺序、重复结构循环提示、有边界的交互候选，以及 tab 选中/未选中态样式与 input 控件类型/样式推断
   collect-layout.js        页面可加载的 DOM 采集器
   collector-expression.js  浏览器工具可执行的采集表达式
 ```

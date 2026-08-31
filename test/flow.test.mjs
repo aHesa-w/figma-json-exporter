@@ -120,3 +120,21 @@ test("failed, changed-design and non-baseline reports cannot unlock the flow sta
   await writeFile(path, JSON.stringify({ ...design(), changed: true }));
   await assert.rejects(validateFiles(path, await fresh(), 1, options), /design digest/);
 });
+
+test("flow hard constraint rejects grid/flex that layoutStrategy does not justify", () => {
+  const make = (texts, autoLayout) => ({ meta: { schemaVersion: 3, exporterVersion: "3.4.1" }, assets: {}, nodes: [{ id: "root", type: "FRAME", name: "root", autoLayout, absoluteBounds: { x: 0, y: 0, width: 100, height: 100 }, children: texts.map((b, i) => ({ id: `t${i}`, name: `t${i}`, type: "TEXT", absoluteBounds: b })) }] });
+  const sample = (display) => ({ collectorVersion: 5, sampleId: randomUUID(), collectedAt: new Date().toISOString(), viewport: { width: 1200, height: 900, devicePixelRatio: 1 }, coordinateSpace: "root-relative", stable: true, fontsReady: true, brokenImages: [], nodes: [
+    { id: "root", rootId: "root", parentId: null, visible: true, bounds: { x: 0, y: 0, width: 100, height: 100 }, renderStyle: renderStyle(), flowStyle: flowStyle({ display }) },
+    ...[0, 1, 2].map(i => ({ id: `t${i}`, rootId: "root", parentId: "root", visible: true, bounds: { x: 0, y: i * 20, width: 10, height: 10 }, renderStyle: renderStyle(), flowStyle: flowStyle() })),
+  ] });
+  // Vertical, non-overlapping children → block-flow (lightweight-default).
+  const vertical = make([{ x: 0, y: 0, width: 10, height: 10 }, { x: 0, y: 20, width: 10, height: 10 }, { x: 0, y: 40, width: 10, height: 10 }]);
+  assert.equal(validateFlow(vertical, sample("grid")).passed, false);
+  assert.ok(validateFlow(vertical, sample("grid")).mismatches[0].issues.some(i => i.includes("grid-not-justified")));
+  assert.ok(validateFlow(vertical, sample("flex")).mismatches[0].issues.some(i => i.includes("flex-not-justified")));
+  assert.equal(validateFlow(vertical, sample("block")).passed, true);
+  // Horizontal SPACE_BETWEEN → flex-row (required): flex justified, grid still not.
+  const horizontal = make([{ x: 0, y: 0, width: 10, height: 10 }, { x: 20, y: 0, width: 10, height: 10 }, { x: 40, y: 0, width: 10, height: 10 }], { mode: "HORIZONTAL", primaryAxisAlignItems: "SPACE_BETWEEN" });
+  assert.equal(validateFlow(horizontal, sample("flex")).passed, true);
+  assert.ok(validateFlow(horizontal, sample("grid")).mismatches[0].issues.some(i => i.includes("grid-not-justified")));
+});

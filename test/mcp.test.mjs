@@ -69,10 +69,17 @@ test("standalone compiled entry auto-starts shared service; stdio and HTTP expos
   const f = await fixture(t);
   const stdio = await f.client();
   const http = await f.client("http");
-  assert.equal((await (await fetch(f.base + "/health")).json()).version, "3.7.0");
+  assert.equal((await (await fetch(f.base + "/health")).json()).version, "3.8.0");
   for (const client of [stdio, http]) {
-    assert.deepEqual((await client.listTools()).tools.map((tool) => tool.name).sort(), ["figma_export", "figma_status", "figma_validate_layout"]);
+    assert.deepEqual((await client.listTools()).tools.map((tool) => tool.name).sort(), ["figma_export", "figma_guidance", "figma_status", "figma_validate_layout"]);
     assert.equal(payload(await client.callTool({ name: "figma_status", arguments: {} })).connected, false);
+    const guidance = payload(await client.callTool({ name: "figma_guidance", arguments: { tags: ["tab", "unknown-tag"] } }));
+    assert.equal(guidance.guidance.tab.title, "Tab interaction");
+    assert.match(guidance.guidance.tab.guidance, /tablist\/tab\/tabpanel/);
+    assert.deepEqual(guidance.missing, ["unknown-tag"]);
+    const catalog = payload(await client.callTool({ name: "figma_guidance", arguments: {} }));
+    assert.ok(catalog.availableTags.includes("workflow"));
+    assert.ok(catalog.availableTags.includes("subagent"));
     const error = await client.callTool({ name: "figma_export", arguments: {} });
     assert.equal(error.isError, true);
     assert.match(error.content[0].text, /not connected/);

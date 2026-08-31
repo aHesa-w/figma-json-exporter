@@ -1,6 +1,6 @@
 import { flattenLayers, prepareDesign, type Layer } from "./geometry.js";
 
-export const STYLE_INSTRUCTIONS = "Final code must include one or more real CSS files imported by the page. Static visual and layout declarations, including raster asset placement, must not remain in style attributes. Keep HTML focused on semantic elements, data-d2c-id and reusable class names. Extract shared foundations, component rules and repeated declaration sets; identical static rule sets must reuse a class. Inline styles are allowed only for genuinely runtime values that cannot be known from the export, preferably passed through documented CSS custom properties.";
+export const STYLE_INSTRUCTIONS = "Final code must include one or more real CSS files imported by the page; static visual/layout declarations and raster asset placement must not remain in style attributes, and HTML stays semantic with data-d2c-id and reusable class names. Load the detailed style contract and per-layer rendering standards on demand with figma_guidance (tags: style, text, image, gradient, clipping, mask, paint) instead of assuming unread rules.";
 
 const STYLE_KEYS = [
   "width", "height", "opacity", "blendMode", "cornerRadius", "cornerRadii", "clipsContent",

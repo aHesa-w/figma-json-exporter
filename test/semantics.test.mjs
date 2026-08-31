@@ -92,3 +92,72 @@ test("interaction inference separates safe local, callback-only and blocked beha
   assert.equal(byId.has("label"), false);
   assert.equal(plan.summary.safeLocalInteractionCount, 3);
 });
+
+test("input controls are inferred with semantic element and style", () => {
+  const inputField = (id, name, x, properties = {}) => layer(id, name, x, 0, [
+    { id: `${id}-placeholder`, name: "Placeholder", type: "TEXT", characters: "Enter value", absoluteBounds: bounds(x + 4, 6), textColor: { css: "rgba(180,180,180,1)" }, fontSize: 14, fontWeight: 400 },
+  ], { fills: [{ type: "SOLID", color: "rgba(255,255,255,1)", visible: true, opacity: 1 }], strokes: [{ type: "SOLID", color: "rgba(218,220,224,1)", visible: true, opacity: 1 }], strokeWeight: 1, cornerRadius: 8, ...properties });
+  const plan = semanticPlan(design([
+    inputField("email", "Email", 0),
+    inputField("pw", "Password", 30),
+    inputField("tf", "Text Field", 60),
+    inputField("dd", "Dropdown", 90),
+    layer("search", "Search", 120, 0),
+  ]));
+  const byId = new Map(plan.interactions.map(candidate => [candidate.id, candidate]));
+  const email = byId.get("email");
+  assert.equal(email.kind, "input");
+  assert.equal(email.inputInference.controlType, "email");
+  assert.equal(email.inputInference.semanticElement, "input[type=email]");
+  assert.equal(email.inputInference.style.background, "rgba(255,255,255,1)");
+  assert.equal(email.inputInference.style.borderColor, "rgba(218,220,224,1)");
+  assert.equal(email.inputInference.style.borderWidth, 1);
+  assert.equal(email.inputInference.style.borderRadius, 8);
+  assert.equal(email.inputInference.style.placeholderColor, "rgba(180,180,180,1)");
+  assert.equal(email.inputInference.placeholder.text, "Enter value");
+  assert.equal(byId.get("pw").inputInference.controlType, "password");
+  assert.equal(byId.get("pw").inputInference.semanticElement, "input[type=password]");
+  assert.equal(byId.get("tf").inputInference.controlType, "text");
+  assert.equal(byId.get("dd").kind, "filter");
+  assert.equal(byId.get("dd").inputInference.controlType, "select");
+  assert.equal(byId.get("dd").inputInference.semanticElement, "select");
+  assert.equal(byId.get("search").kind, "search");
+  assert.equal(byId.get("search").inputInference.controlType, "search");
+  assert.deepEqual(email.guidanceTags, ["input", "input-email"]);
+  assert.deepEqual(byId.get("search").guidanceTags, ["search"]);
+  assert.deepEqual(byId.get("dd").guidanceTags, ["select"]);
+  assert.equal(plan.summary.inputControlCount, 5);
+});
+
+test("tab groups infer selected state and per-state styles", () => {
+  const tab = (id, name, x, textColor, properties = {}) => layer(id, name, x, 0, [
+    { id: `${id}-label`, name, type: "TEXT", characters: name, absoluteBounds: bounds(x, 0), textColor: { css: textColor }, fontSize: 14, fontWeight: 400 },
+  ], properties);
+  const plan = semanticPlan(design([
+    tab("tab1", "Tab 1", 0, "rgba(95,99,104,1)"),
+    tab("tab2", "Tab 2", 60, "rgba(95,99,104,1)"),
+    tab("tab3", "Tab 3", 120, "rgba(26,115,232,1)", { strokes: [{ type: "SOLID", color: "rgba(26,115,232,1)", visible: true, opacity: 1 }], strokeWeight: 2 }),
+  ]));
+  const tabs = plan.interactions.filter(candidate => candidate.kind === "tab");
+  assert.equal(tabs.length, 3);
+  const byId = new Map(tabs.map(candidate => [candidate.id, candidate]));
+  const selected = tabs.find(candidate => candidate.tabInference.selected);
+  assert.equal(selected.id, "tab3");
+  assert.equal(byId.get("tab1").tabInference.groupId, selected.tabInference.groupId);
+  assert.equal(selected.tabInference.selectedEvidence.includes("highest visual prominence"), true);
+  assert.equal(selected.tabInference.stateStyles.selected.textColor, "rgba(26,115,232,1)");
+  assert.equal(selected.tabInference.stateStyles.selected.indicatorColor, "rgba(26,115,232,1)");
+  assert.equal(selected.tabInference.stateStyles.unselected.textColor, "rgba(95,99,104,1)");
+  assert.equal(byId.get("tab1").tabInference.selected, false);
+  assert.deepEqual(byId.get("tab1").guidanceTags, ["tab"]);
+  assert.equal(plan.summary.tabGroupCount, 1);
+});
+
+test("containers and repeat groups expose guidanceTags for progressive loading", () => {
+  const plan = semanticPlan(design([
+    card("one", 1, 0, 0), card("two", 2, 0, 30), card("three", 3, 0, 60),
+  ]));
+  const root = plan.containers.find(container => container.id === "root");
+  assert.deepEqual(root.guidanceTags, ["block-flow", "visual-reading-order"]);
+  assert.deepEqual(plan.repeatGroups[0].guidanceTags, ["repeat"]);
+});

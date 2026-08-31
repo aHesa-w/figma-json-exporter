@@ -12,7 +12,7 @@ export interface ValidationOptions {
   baselineReportPath?: string;
   flowExceptions?: FlowException[];
 }
-export const WORKFLOW_INSTRUCTIONS = "Two required stages: validate baseline geometry/styles first (phase=baseline). After it passes, refactor the real page into normal document flow using the lightest suitable primitive (block, then inline/inline-block, then flex, then grid), preserve layer IDs and design hierarchy, and remeasure at the SAME viewport. Flex is reserved for dynamic distribution, fill/stretch or wrapping; grid is reserved for genuine two-dimensional alignment or paint stacks. Then call phase=flow with baselineReportPath from the successful baseline. Do not reuse baseline measurements, relax tolerance, delete layers or edit design targets. Only workflowComplete=true completes the automated workflow; visual review remains separate. Absolute coordinates are reference measurements, not a requirement to implement absolute positioning. Raster asset IMG offsets are exempt; their ID-bearing layout wrappers must participate in flow.";
+export const WORKFLOW_INSTRUCTIONS = "Two required stages: validate baseline geometry/styles first (phase=baseline), then refactor the real page into normal document flow and validate again (phase=flow with the successful baselineReportPath; never reuse baseline measurements or relax tolerance). Load the detailed standard for each stage on demand with figma_guidance (tags: workflow, baseline, flow, style) instead of assuming unread rules. If the agent supports subagents, delegate the heavy generation/refactor/validation to subagents following this same workflow (tag: subagent). Only workflowComplete=true completes the automated workflow; visual review remains separate. Build the FIRST version directly in document flow (block/inline/flex/grid); do not generate an absolute-positioned draft and then convert it. Exported absolute coordinates are reference measurements, not a requirement to use absolute positioning. Hard constraint: a grid/flex container must match its semantic-plan layoutStrategy (grid only for grid/grid-overlay, flex only for flex-row/flex-column); unjustified grid/flex fails the flow stage and cannot be exempted.";
 
 function exceptionCandidate(node: Layer): boolean {
   if (node.id === node.rootId) return false;
@@ -26,7 +26,8 @@ export function flowPlan(input: unknown) {
     instructions: WORKFLOW_INSTRUCTIONS,
     stages: ["baseline", "flow"],
     rules: [
-      "Save a working baseline before refactoring; adjust parent containers first, then children. Iterate on actual HTML/CSS until both layout and style checks pass again.",
+      "Build the first version directly in document flow; do not generate an absolute-positioned draft and then convert it. Save a working checkpoint before the flow validation and adjust parent containers first, then children.",
+      "HARD CONSTRAINT: a container using display:grid or display:flex must match its semantic-plan layoutStrategy. grid is allowed only when layoutStrategy=grid/grid-overlay; flex is allowed only when layoutStrategy=flex-row/flex-column. The flow validator rejects unjustified grid/flex and this is never exemptable.",
       "Use block flow for ordinary vertical structure and inline/inline-block for simple horizontal content. Promote to flex only for dynamic distribution, fill/stretch or wrap; promote to grid only for two-dimensional alignment or paint stacks.",
       "Source Auto Layout is evidence about order, padding, gap and sizing, not an instruction to always emit display:flex. Coordinates alone do not determine a unique flow layout.",
       "Keep data-d2c-id and the nearest labelled parent. Anonymous structural wrappers must have a semantic role and must not introduce out-of-flow positioning or visual effects.",
@@ -64,8 +65,26 @@ function boxIssues(box: FlowBox | undefined): string[] {
   return issues;
 }
 
+// Hard constraint: the layout primitive an implementation actually uses must not
+// be heavier than the semantic-plan layoutStrategy. grid/flex are only justified
+// when the source genuinely requires them; this is never exemptable.
+function layoutPrimitiveIssues(display: string | undefined, strategy: { preferred: string; necessity: string } | undefined): string[] {
+  if (!display || !strategy) return [];
+  const issues: string[] = [];
+  const isGrid = display === "grid" || display === "inline-grid";
+  const isFlex = display === "flex" || display === "inline-flex";
+  if (isGrid && !["grid", "grid-overlay"].includes(strategy.preferred)) {
+    issues.push(`grid-not-justified (layoutStrategy prefers ${strategy.preferred}/${strategy.necessity}): grid requires two-dimensional alignment or an overlapping paint stack`);
+  }
+  if (isFlex && !["flex-row", "flex-column"].includes(strategy.preferred)) {
+    issues.push(`flex-not-justified (layoutStrategy prefers ${strategy.preferred}/${strategy.necessity}): flex requires dynamic distribution, fill/stretch or wrap`);
+  }
+  return issues;
+}
+
 export function validateFlow(input: unknown, actual: ActualLayout, exceptions: FlowException[] = []) {
   const layers = flattenLayers(prepareDesign(input)), byId = new Map(layers.map(n => [n.id, n]));
+  const containers = new Map(semanticPlan(input).containers.map(container => [container.id, container]));
   const approved = new Map<string, string>();
   for (const entry of exceptions) {
     const node = byId.get(entry.id);
@@ -80,6 +99,8 @@ export function validateFlow(input: unknown, actual: ActualLayout, exceptions: F
     if (!Array.isArray(style?.wrappers)) issues.push("missing-flow-wrappers");
     else style.wrappers.forEach((box, index) => issues.push(...boxIssues(box).map(issue => `wrapper[${index}].${issue}`)));
     if (style && measured?.renderStyle && style.position !== measured.renderStyle.position) issues.push("inconsistent-position-sample");
+    // Hard constraint: justify every grid/flex container; never exemptable.
+    issues.push(...layoutPrimitiveIssues(style?.display, containers.get(node.id)?.layoutStrategy));
     if (issues.length) mismatches.push({ id: node.id, issues });
   }
   return { passed: mismatches.length === 0, mismatches, exceptions: [...approved].map(([id, reason]) => ({ id, reason, reviewRequired: true })) };

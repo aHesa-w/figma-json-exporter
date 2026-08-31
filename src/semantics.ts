@@ -1,6 +1,6 @@
 import { prepareDesign, type Layer } from "./geometry.js";
 
-export const SEMANTIC_INSTRUCTIONS = "Read semantic-plan.json before the flow refactor. Follow each container layoutStrategy and prefer the lightest primitive that preserves semantics and geometry: block flow first, then inline/inline-block, then flex, and grid only for genuine two-dimensional alignment or paint stacks. Do not mechanically translate every Figma Auto Layout or x/y coordinate set into flex/grid. Emit labelled siblings in codeOrder when orderPolicy=visual-reading-order; preserve design order for overlapping paint stacks. Framework targets should render repeatGroups from data with stable keys while preserving every instance data-d2c-id. Plain HTML must keep expanded DOM and copy the supplied loopComment around the repeated instances. Implement only safe-local interaction candidates autonomously; callback-only candidates expose typed callbacks/events without inventing navigation, APIs or persistence, and blocked candidates remain inert pending product requirements. Inferred interactions need semantic elements, keyboard behavior, focus visibility and ARIA state. Re-run browser geometry/style validation after semantic refactoring.";
+export const SEMANTIC_INSTRUCTIONS = "Read semantic-plan.json before the flow refactor. Every container, repeatGroup and interaction candidate carries guidanceTags: call figma_guidance with those tags and follow the returned standards before implementing that node — do not assume unread rules. Follow codeOrder/orderPolicy for sibling order, render repeatGroups from data with stable keys (or d2c-repeat comments in plain HTML) preserving every data-d2c-id, and implement only safe-local interactions autonomously (callback-only expose typed callbacks/events, blocked stay inert). Re-run browser geometry/style validation after semantic refactoring.";
 
 type OrderingPolicy = "visual-reading-order" | "preserve-design-paint-order";
 type InteractionAutonomy = "safe-local" | "callback-only" | "blocked";
@@ -21,6 +21,7 @@ interface SemanticContainer {
   orderPolicy: OrderingPolicy;
   readingDirection: "top-to-bottom" | "left-to-right" | "row-major";
   layoutStrategy: LayoutStrategy;
+  guidanceTags: string[];
   reason: string;
 }
 
@@ -32,6 +33,42 @@ interface RepeatGroup {
   keySource: "data-d2c-id";
   frameworkLoop: string;
   loopComment: { start: string; end: string };
+  guidanceTags: string[];
+}
+
+interface TabStateStyle {
+  textColor: string | null;
+  fontWeight: number | null;
+  indicatorColor: string | null;
+  indicatorWeight: number | null;
+  background: string | null;
+}
+
+interface TabInference {
+  groupId: string;
+  selected: boolean;
+  selectedEvidence: string;
+  stateStyles: { selected: TabStateStyle; unselected: TabStateStyle };
+}
+
+interface InputControlStyle {
+  background: string | null;
+  borderColor: string | null;
+  borderWidth: number | null;
+  borderRadius: number | null;
+  textColor: string | null;
+  fontSize: number | null;
+  fontWeight: number | null;
+  placeholderColor: string | null;
+  padding: { left: number; right: number; top: number; bottom: number } | null;
+}
+
+interface InputInference {
+  controlType: string;
+  semanticElement: string;
+  confidence: number;
+  style: InputControlStyle;
+  placeholder: { text: string; color: string } | null;
 }
 
 interface InteractionCandidate {
@@ -43,6 +80,9 @@ interface InteractionCandidate {
   behavior: string;
   accessibility: string[];
   evidence: string;
+  guidanceTags: string[];
+  tabInference?: TabInference;
+  inputInference?: InputInference;
 }
 
 function descendants(nodes: Layer[]): Layer[] {
@@ -124,12 +164,13 @@ function semanticContainers(nodes: Layer[]): SemanticContainer[] {
       reason = "Wrapped horizontal Auto Layout; code follows top-to-bottom rows and left-to-right items";
     }
 
+    const layoutStrategy = inferLayoutStrategy(node, children, hasOverlap);
     if (hasOverlap) {
       return {
         id: node.id, name: node.name, designOrder, codeOrder: designOrder,
         orderPolicy: "preserve-design-paint-order" as const,
-        readingDirection,
-        layoutStrategy: inferLayoutStrategy(node, children, hasOverlap),
+        readingDirection, layoutStrategy,
+        guidanceTags: [layoutStrategy.preferred, "preserve-design-paint-order"],
         reason: "Overlapping siblings depend on paint order; retain design order unless explicit z-index preserves the stack",
       };
     }
@@ -137,7 +178,9 @@ function semanticContainers(nodes: Layer[]): SemanticContainer[] {
     return {
       id: node.id, name: node.name, designOrder, codeOrder: sorted.map(child => child.id),
       orderPolicy: "visual-reading-order" as const, readingDirection,
-      layoutStrategy: inferLayoutStrategy(node, children, hasOverlap), reason,
+      layoutStrategy,
+      guidanceTags: [layoutStrategy.preferred, "visual-reading-order"],
+      reason,
     };
   });
 }
@@ -188,6 +231,7 @@ function repeatGroups(nodes: Layer[], containers: SemanticContainer[]): RepeatGr
             start: `<!-- d2c-repeat: component=${component}; collection=${collection}; key=data-d2c-id; count=${run.length} -->`,
             end: `<!-- d2c-repeat-end: ${component} -->`,
           },
+          guidanceTags: ["repeat"],
         });
       }
       start = end;
@@ -199,25 +243,239 @@ function repeatGroups(nodes: Layer[], containers: SemanticContainer[]): RepeatGr
 const excludedName = /(?:\b(label|text|icon|dot|divider|header|footer|cell|title|description)\b|文字|图标|圆点|分割线|页头|页脚|单元格|标题|描述)/iu;
 const dangerousName = /(?:\b(delete|remove|destroy|pay|purchase|submit|publish|login|logout|authorize|upload)\b|删除|移除|销毁|支付|购买|提交|发布|登录|登出|授权|上传)/iu;
 
+// ── 控件样式推断工具（只读导出的 paints/text 字段，不做像素猜测） ──
+
+const asRecord = (node: Layer): Record<string, unknown> => node as unknown as Record<string, unknown>;
+
+interface Rgba { r: number; g: number; b: number; a: number }
+
+function parseRgba(css: string | null | undefined): Rgba | null {
+  if (!css) return null;
+  const match = /rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)(?:\s*,\s*([\d.]+))?\)/i.exec(css);
+  if (!match) return null;
+  return { r: Number(match[1]), g: Number(match[2]), b: Number(match[3]), a: match[4] === undefined ? 1 : Number(match[4]) };
+}
+
+function solidPaint(paints: unknown): string | null {
+  if (!Array.isArray(paints)) return null;
+  for (const paint of paints) {
+    if (!paint || typeof paint !== "object") continue;
+    const entry = paint as Record<string, unknown>;
+    if (entry.type === "SOLID" && entry.visible !== false && entry.opacity !== 0 && typeof entry.color === "string") return entry.color;
+  }
+  return null;
+}
+
+function solidFill(node: Layer): string | null { return solidPaint(asRecord(node).fills); }
+function solidStroke(node: Layer): string | null { return solidPaint(asRecord(node).strokes); }
+
+function primaryText(node: Layer): Layer | null {
+  if (node.type === "TEXT") return node;
+  return descendants([node]).find(child => child.type === "TEXT") ?? null;
+}
+
+function textColorOf(node: Layer): string | null {
+  const text = primaryText(node);
+  const color = text ? asRecord(text).textColor : undefined;
+  const css = color && typeof color === "object" ? (color as Record<string, unknown>).css : undefined;
+  return typeof css === "string" ? css : null;
+}
+
+function layerNumber(node: Layer, key: string): number | null {
+  const value = asRecord(node)[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function paddingOf(node: Layer): { left: number; right: number; top: number; bottom: number } | null {
+  const auto = asRecord(node).autoLayout as Record<string, unknown> | undefined;
+  if (!auto) return null;
+  const values = ["paddingLeft", "paddingRight", "paddingTop", "paddingBottom"].map(key => auto[key]);
+  if (!values.every((value): value is number => typeof value === "number")) return null;
+  return { left: values[0], right: values[1], top: values[2], bottom: values[3] };
+}
+
+function isLightGray(rgba: Rgba | null): boolean {
+  if (!rgba) return false;
+  const max = Math.max(rgba.r, rgba.g, rgba.b), min = Math.min(rgba.r, rgba.g, rgba.b);
+  return max - min <= 40 && (max + min) / 2 >= 150;
+}
+
+function findPlaceholder(node: Layer): { text: string; color: string } | null {
+  const texts = descendants([node]).filter(child => {
+    if (child.type !== "TEXT") return false;
+    const characters = asRecord(child).characters;
+    return typeof characters === "string" && characters.trim().length > 0;
+  });
+  const candidates = texts.map(text => ({ text: String(asRecord(text).characters).trim(), color: textColorOf(text), name: normalizeName(text.name), rgba: parseRgba(textColorOf(text)) }))
+    .filter((candidate): candidate is { text: string; color: string; name: string; rgba: Rgba | null } => typeof candidate.color === "string" && candidate.color.length > 0);
+  if (!candidates.length) return null;
+  const placeholder = candidates.find(candidate => /(?:hint|placeholder|占位|提示|示例|example|eg)/iu.test(candidate.name) || isLightGray(candidate.rgba));
+  const picked = placeholder ?? candidates[candidates.length - 1];
+  return { text: picked.text, color: picked.color };
+}
+
+function tabStateStyle(node: Layer): TabStateStyle {
+  const text = primaryText(node);
+  return {
+    textColor: textColorOf(node),
+    fontWeight: text ? layerNumber(text, "fontWeight") : null,
+    indicatorColor: solidStroke(node),
+    indicatorWeight: layerNumber(node, "strokeWeight"),
+    background: solidFill(node),
+  };
+}
+
+function tabProminence(node: Layer): number {
+  let score = 0;
+  const color = parseRgba(textColorOf(node));
+  if (color && Math.max(color.r, color.g, color.b) - Math.min(color.r, color.g, color.b) > 40) score += 1;
+  if (solidStroke(node)) score += 1;
+  const text = primaryText(node);
+  const weight = text ? layerNumber(text, "fontWeight") : null;
+  if (weight !== null && weight > 400) score += 0.5;
+  if (solidFill(node)) score += 0.5;
+  return score;
+}
+
+function sameBand(a: Layer, b: Layer): boolean {
+  const ab = a.absoluteBounds, bb = b.absoluteBounds;
+  const rowTolerance = Math.max(2, Math.min(ab.height, bb.height) * 0.25);
+  const colTolerance = Math.max(2, Math.min(ab.width, bb.width) * 0.25);
+  return Math.abs(ab.y - bb.y) <= rowTolerance || Math.abs(ab.x - bb.x) <= colTolerance;
+}
+
+function assignTabInference(candidates: InteractionCandidate[], nodes: Layer[]): void {
+  const byId = new Map(descendants(nodes).map(node => [node.id, node]));
+  const parentGroups = new Map<string, InteractionCandidate[]>();
+  for (const candidate of candidates) {
+    if (candidate.kind !== "tab") continue;
+    const node = byId.get(candidate.id);
+    parentGroups.set(node?.parentId ?? node?.rootId ?? "", [...(parentGroups.get(node?.parentId ?? node?.rootId ?? "") ?? []), candidate]);
+  }
+  let sequence = 0;
+  for (const group of parentGroups.values()) {
+    const bands: InteractionCandidate[][] = [];
+    for (const candidate of group) {
+      const node = byId.get(candidate.id);
+      if (!node) continue;
+      const host = bands.find(band => band.some(member => sameBand(node, byId.get(member.id)!)));
+      if (host) host.push(candidate);
+      else bands.push([candidate]);
+    }
+    for (const band of bands) {
+      sequence += 1;
+      const groupId = `tab-group-${sequence}`;
+      const scored = band.map(candidate => ({ candidate, node: byId.get(candidate.id)!, score: tabProminence(byId.get(candidate.id)!) }));
+      const maxScore = Math.max(...scored.map(entry => entry.score));
+      const distinct = maxScore > 0 && scored.filter(entry => entry.score === maxScore).length === 1;
+      const selectedEntry = distinct ? scored.find(entry => entry.score === maxScore)! : scored[0];
+      const selectedEvidence = distinct
+        ? "Selected tab shows the highest visual prominence (colored text, indicator stroke, heavier weight or distinct background)"
+        : "No distinguishing style detected; defaulting to the first tab as selected pending design review";
+      const unselectedNode = scored.find(entry => entry.candidate.id !== selectedEntry.candidate.id)?.node ?? selectedEntry.node;
+      const stateStyles = { selected: tabStateStyle(selectedEntry.node), unselected: tabStateStyle(unselectedNode) };
+      for (const entry of scored) {
+        entry.candidate.tabInference = { groupId, selected: entry.candidate.id === selectedEntry.candidate.id, selectedEvidence, stateStyles };
+      }
+    }
+  }
+}
+
+function inferInput(node: Layer): { controlType: string; semanticElement: string; confidence: number } | null {
+  const lower = normalizeName(node.name).toLowerCase();
+  const rules: Array<[RegExp, string, string, number]> = [
+    [/(?:\bsearch\b|搜索|查找|检索)/u, "search", "input[type=search]", 0.95],
+    [/(?:\bpassword\b|\bpass\b|密码)/u, "password", "input[type=password]", 0.95],
+    [/(?:\be-?mail\b|\bemail\b|邮箱|邮件)/u, "email", "input[type=email]", 0.95],
+    [/(?:\bphone\b|\btel\b|\bmobile\b|手机号?|电话)/u, "tel", "input[type=tel]", 0.9],
+    [/(?:\bamount\b|\bqty\b|\bquantity\b|数量|金额)/u, "number", "input[type=number]", 0.85],
+    [/(?:\btextarea\b|text\s*area|多行|文本域|备注|简介|留言)/u, "textarea", "textarea", 0.9],
+    [/(?:\bselect\b|\bdropdown\b|\bcombo\b|下拉|选择器)/u, "select", "select", 0.9],
+    [/(?:\bcheckbox\b|复选框|多选)/u, "checkbox", "input[type=checkbox]", 0.92],
+    [/(?:\bradio\b|单选)/u, "radio", "input[type=radio]", 0.9],
+    [/(?:\bswitch\b|\btoggle\b|开关)/u, "switch", "input[type=checkbox][role=switch]", 0.9],
+    [/(?:\binput\b|\btextbox\b|text\s*field|输入框?|文本框|编辑框)/u, "text", "input[type=text]", 0.85],
+  ];
+  for (const [pattern, controlType, semanticElement, confidence] of rules) {
+    if (pattern.test(lower)) return { controlType, semanticElement, confidence };
+  }
+  return null;
+}
+
+function inferControlStyle(node: Layer): { style: InputControlStyle; placeholder: { text: string; color: string } | null } {
+  const text = primaryText(node);
+  const placeholder = findPlaceholder(node);
+  return {
+    style: {
+      background: solidFill(node),
+      borderColor: solidStroke(node),
+      borderWidth: layerNumber(node, "strokeWeight"),
+      borderRadius: layerNumber(node, "cornerRadius"),
+      textColor: textColorOf(node),
+      fontSize: text ? layerNumber(text, "fontSize") : null,
+      fontWeight: text ? layerNumber(text, "fontWeight") : null,
+      placeholderColor: placeholder?.color ?? null,
+      padding: paddingOf(node),
+    },
+    placeholder,
+  };
+}
+
+function inputBehavior(controlType: string): string {
+  if (controlType === "search") return "Filter already-rendered local content; do not call a remote API unless specified";
+  if (controlType === "select") return "Change local filter state using values present in the rendered data";
+  if (["checkbox", "radio", "switch"].includes(controlType)) return "Toggle local boolean/selection state only";
+  return "Manage only local input state; never invent validation, submission, APIs or persistence";
+}
+
+function inputAccessibility(controlType: string): string[] {
+  if (controlType === "search") return ["Use input type=search", "Provide an accessible label", "Keep results count announced"];
+  if (controlType === "select") return ["Use a native select when possible", "Expose current value", "Support keyboard operation"];
+  if (["checkbox", "radio", "switch"].includes(controlType)) return ["Use checkbox/switch/radio semantics", "Expose checked/selected state", "Provide focus visibility"];
+  return ["Associate a visible label (label or aria-label)", "Use the inferred semantic element", "Provide a visible focus state"];
+}
+
+function inputGuidanceTags(controlType: string): string[] {
+  if (controlType === "search") return ["search"];
+  if (controlType === "select") return ["select"];
+  if (["checkbox", "radio", "switch"].includes(controlType)) return ["toggle", controlType];
+  return ["input", `input-${controlType}`];
+}
+
 function interactionFor(node: Layer): InteractionCandidate | null {
   const name = normalizeName(node.name);
+  if (!name || node.type === "TEXT") return null;
   const lower = name.toLowerCase();
-  if (!name || excludedName.test(name) || node.type === "TEXT") return null;
   const base = { id: node.id, name: node.name, evidence: `Layer name: ${node.name}` };
-  if (dangerousName.test(name)) return { ...base, kind: "business-action", confidence: 0.9, autonomy: "blocked", behavior: "Do not invent or execute a side effect; require an explicit product contract", accessibility: ["Use a semantic button only after the action is confirmed", "Expose disabled/pending state when rendered"] };
-  if (/(?:\btab\b|标签页|选项卡)/u.test(lower)) return { ...base, kind: "tab", confidence: 0.95, autonomy: "safe-local", behavior: "Switch the associated local panel without navigation or persistence", accessibility: ["role=tab/tablist/tabpanel", "Arrow-key navigation", "aria-selected and aria-controls"] };
-  if (/(?:\bsearch\b|搜索)/u.test(lower)) return { ...base, kind: "search", confidence: 0.95, autonomy: "safe-local", behavior: "Filter already-rendered local content; do not call a remote API unless specified", accessibility: ["Use input type=search", "Provide an accessible label", "Keep results count announced"] };
-  if (/(?:\b(filter|select|dropdown)\b|筛选|过滤|下拉|选择器)/u.test(lower)) return { ...base, kind: "filter", confidence: 0.9, autonomy: "safe-local", behavior: "Change local filter state using values present in the rendered data", accessibility: ["Use a native select when possible", "Expose current value", "Support keyboard operation"] };
-  if (/(?:\b(toggle|switch|checkbox)\b|开关|复选框)/u.test(lower)) return { ...base, kind: "toggle", confidence: 0.92, autonomy: "safe-local", behavior: "Toggle local boolean state only", accessibility: ["Use checkbox or switch semantics", "Expose checked state", "Provide focus visibility"] };
-  if (/(?:\b(accordion|disclosure|expand|collapse)\b|手风琴|展开|收起|折叠)/u.test(lower)) return { ...base, kind: "disclosure", confidence: 0.9, autonomy: "safe-local", behavior: "Show or hide an existing local content region", accessibility: ["aria-expanded", "aria-controls", "Enter and Space activation"] };
-  if (/(?:\b(previous|next|pagination)\b|上一页|下一页|分页)/u.test(lower)) return { ...base, kind: "pagination", confidence: 0.88, autonomy: "safe-local", behavior: "Change local page state only when multiple rendered pages exist; otherwise disable", accessibility: ["Use semantic buttons", "Expose disabled state", "Announce page position"] };
-  if (/(?:\b(nav|navigation|sidebar item)\b|导航|侧边栏项)/u.test(lower)) return { ...base, kind: "navigation", confidence: 0.86, autonomy: "callback-only", behavior: "Expose a navigation callback; do not invent routes or URLs", accessibility: ["Use nav and link/button semantics", "Expose aria-current for the active destination"] };
-  if (/(?:\b(button|configure|settings|avatar|bell)\b|按钮|配置|设置|头像|通知)/u.test(lower)) return { ...base, kind: "action", confidence: 0.8, autonomy: "callback-only", behavior: "Expose a named callback or CustomEvent; do not invent business behavior", accessibility: ["Use a semantic button", "Provide an accessible name", "Support Enter and Space"] };
+  if (dangerousName.test(name)) return { ...base, kind: "business-action", confidence: 0.9, autonomy: "blocked", behavior: "Do not invent or execute a side effect; require an explicit product contract", accessibility: ["Use a semantic button only after the action is confirmed", "Expose disabled/pending state when rendered"], guidanceTags: ["business-action"] };
+
+  const input = inferInput(node);
+  if (input) {
+    const { style, placeholder } = inferControlStyle(node);
+    const inputInference: InputInference = { controlType: input.controlType, semanticElement: input.semanticElement, confidence: input.confidence, style, placeholder };
+    const behavior = inputBehavior(input.controlType);
+    const accessibility = inputAccessibility(input.controlType);
+    const guidanceTags = inputGuidanceTags(input.controlType);
+    if (input.controlType === "search") return { ...base, kind: "search", confidence: input.confidence, autonomy: "safe-local", behavior, accessibility, inputInference, guidanceTags };
+    if (input.controlType === "select") return { ...base, kind: "filter", confidence: input.confidence, autonomy: "safe-local", behavior, accessibility, inputInference, guidanceTags };
+    if (["checkbox", "radio", "switch"].includes(input.controlType)) return { ...base, kind: "toggle", confidence: input.confidence, autonomy: "safe-local", behavior, accessibility, inputInference, guidanceTags };
+    return { ...base, kind: "input", confidence: input.confidence, autonomy: "safe-local", behavior, accessibility, inputInference, guidanceTags };
+  }
+
+  if (excludedName.test(name)) return null;
+  if (/(?:\btab\b|标签页|选项卡)/u.test(lower)) return { ...base, kind: "tab", confidence: 0.95, autonomy: "safe-local", behavior: "Switch the associated local panel without navigation or persistence", accessibility: ["role=tab/tablist/tabpanel", "Arrow-key navigation", "aria-selected and aria-controls"], guidanceTags: ["tab"] };
+  if (/(?:\bfilter\b|筛选|过滤)/u.test(lower)) return { ...base, kind: "filter", confidence: 0.9, autonomy: "safe-local", behavior: "Change local filter state using values present in the rendered data", accessibility: ["Use a native select when possible", "Expose current value", "Support keyboard operation"], guidanceTags: ["filter"] };
+  if (/(?:\b(accordion|disclosure|expand|collapse)\b|手风琴|展开|收起|折叠)/u.test(lower)) return { ...base, kind: "disclosure", confidence: 0.9, autonomy: "safe-local", behavior: "Show or hide an existing local content region", accessibility: ["aria-expanded", "aria-controls", "Enter and Space activation"], guidanceTags: ["disclosure"] };
+  if (/(?:\b(previous|next|pagination)\b|上一页|下一页|分页)/u.test(lower)) return { ...base, kind: "pagination", confidence: 0.88, autonomy: "safe-local", behavior: "Change local page state only when multiple rendered pages exist; otherwise disable", accessibility: ["Use semantic buttons", "Expose disabled state", "Announce page position"], guidanceTags: ["pagination"] };
+  if (/(?:\b(nav|navigation|sidebar item)\b|导航|侧边栏项)/u.test(lower)) return { ...base, kind: "navigation", confidence: 0.86, autonomy: "callback-only", behavior: "Expose a navigation callback; do not invent routes or URLs", accessibility: ["Use nav and link/button semantics", "Expose aria-current for the active destination"], guidanceTags: ["navigation"] };
+  if (/(?:\b(button|configure|settings|avatar|bell)\b|按钮|配置|设置|头像|通知)/u.test(lower)) return { ...base, kind: "action", confidence: 0.8, autonomy: "callback-only", behavior: "Expose a named callback or CustomEvent; do not invent business behavior", accessibility: ["Use a semantic button", "Provide an accessible name", "Support Enter and Space"], guidanceTags: ["action"] };
   return null;
 }
 
 function interactionCandidates(nodes: Layer[]): InteractionCandidate[] {
-  return descendants(nodes).map(interactionFor).filter((candidate): candidate is InteractionCandidate => Boolean(candidate));
+  const candidates = descendants(nodes).map(interactionFor).filter((candidate): candidate is InteractionCandidate => Boolean(candidate));
+  assignTabInference(candidates, nodes);
+  return candidates;
 }
 
 export function semanticPlan(input: unknown) {
@@ -245,6 +503,8 @@ export function semanticPlan(input: unknown) {
       repeatGroupCount: repeats.length,
       interactionCandidateCount: interactions.length,
       safeLocalInteractionCount: interactions.filter(candidate => candidate.autonomy === "safe-local").length,
+      tabGroupCount: new Set(interactions.filter(candidate => candidate.tabInference).map(candidate => candidate.tabInference!.groupId)).size,
+      inputControlCount: interactions.filter(candidate => candidate.inputInference).length,
     },
   };
 }
