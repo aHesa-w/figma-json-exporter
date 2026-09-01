@@ -195,6 +195,22 @@ test("ellipse layers render as a full inscribed oval via border-radius:50%", () 
   assert.match(rule, /border-radius:50%/);
 });
 
+test("layered siblings stack by design paint order, keeping backdrops behind content", () => {
+  // A raster backdrop drawn before a label must stay behind it even though the
+  // reading order puts content first in the DOM.
+  const preview = generatePreview({
+    meta: { schemaVersion: 3, exporterVersion: "3.5.0" }, assets: {},
+    nodes: [{ id: "card", name: "card", type: "GROUP", absoluteBounds: box(0, 0, 200, 200), children: [
+      { id: "backdrop", name: "backdrop", type: "RECTANGLE", absoluteBounds: box(0, 0, 200, 200), renderAs: "image", assetId: "bg" },
+      { id: "label", name: "label", type: "FRAME", absoluteBounds: box(50, 50, 100, 40), children: [text("label-t", "L", 50, 50, "L")] },
+    ] }],
+  });
+  const cls = (id) => preview.html.match(new RegExp(`class="d2c-node ([^"]+)" data-d2c-id="${id}"`))?.[1];
+  const rule = (id) => preview.css.match(new RegExp(`\\.${cls(id)} \\{([^}]+)\\}`))?.[1] ?? "";
+  assert.match(rule("backdrop"), /z-index:1/);
+  assert.match(rule("label"), /z-index:2/);
+});
+
 test("overlapping content children keep exported coordinates instead of spreading inline", () => {
   // Three overlapping card instances in a single visual row. Inline flow would
   // spread them side by side; they must stay absolutely positioned on top of

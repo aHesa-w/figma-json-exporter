@@ -278,6 +278,7 @@ export function generatePreview(input: unknown): PreviewBundle {
   const orderedById = new Map<string, Layer[]>();
   const multiRowById = new Map<string, boolean>();
   const contentAbsoluteById = new Map<string, boolean>();
+  const paintOrderById = new Map<string, number>();
   const renderUnitsById = new Map<string, RenderUnit[]>();
   const rowTopById = new Map<string, number>();
   const prevInRowById = new Map<string, Layer | null>();
@@ -291,6 +292,7 @@ export function generatePreview(input: unknown): PreviewBundle {
     const order = orderById.get(parent.id);
     const byId = new Map(children.map(child => [child.id, child]));
     const ordered = order ? [...order.map(id => byId.get(id)).filter((node): node is Layer => Boolean(node)), ...children.filter(child => !order.includes(child.id))] : children;
+    ordered.forEach((child, index) => paintOrderById.set(child.id, index + 1));
     const backgrounds = backgroundIds(parent, ordered);
     const overlays = overlayIds(parent, ordered, backgrounds);
     const primitive = strategyById.get(parent.id) ?? (children.length === 1 ? "block-flow" : "layered-flow");
@@ -377,7 +379,8 @@ export function generatePreview(input: unknown): PreviewBundle {
     const nodeWidth = rotatedSize ? rotatedSize.width : node.absoluteBounds.width;
     const nodeHeight = rotatedSize ? rotatedSize.height : node.absoluteBounds.height;
     const placement: Placement = { primitive: effectivePrimitive, role, align, previous, rowTop: rowTopValue, inRow, absolute, rotation };
-    const rules = [`width:${px(nodeWidth)}`, `height:${px(nodeHeight)}`, ...placementCSS(node, parent, placement), ...paintCSS(node, design), ...textCSS(node)];
+    const paintOrder = parentPrimitive === "layered-flow" ? [`z-index:${paintOrderById.get(node.id) ?? 0}`] : [];
+    const rules = [`width:${px(nodeWidth)}`, `height:${px(nodeHeight)}`, ...placementCSS(node, parent, placement), ...paintOrder, ...paintCSS(node, design), ...textCSS(node)];
     cssRules.push(`.${classById.get(node.id)} { ${rules.join("; ")}; }`);
     if (Array.isArray(node.styledTextSegments)) node.styledTextSegments.forEach((segment, segmentIndex) => {
       const style = record(segment);
@@ -394,7 +397,7 @@ export function generatePreview(input: unknown): PreviewBundle {
       const display = renderedPrimitive === "flex-row" || renderedPrimitive === "flex-column" ? "flex" : renderedPrimitive === "inline-flow" ? "block" : "flow-root";
       const extras = [
         renderedPrimitive === "flex-row" ? "flex-direction:row;flex-wrap:wrap" : renderedPrimitive === "flex-column" ? "flex-direction:column" : renderedPrimitive === "inline-flow" ? "font-size:0;white-space:nowrap" : "",
-        primitive === "layered-flow" ? "position:relative" : "",
+        primitive === "layered-flow" ? "position:relative;isolation:isolate" : "",
       ].filter(Boolean).join(";");
       cssRules.push(`.${classById.get(node.id)} > .d2c-children { display:${display}; ${extras ? `${extras}; ` : ""}width:100%; height:100%; }`);
     }
