@@ -69,7 +69,7 @@ test("standalone compiled entry auto-starts shared service; stdio and HTTP expos
   const f = await fixture(t);
   const stdio = await f.client();
   const http = await f.client("http");
-  assert.equal((await (await fetch(f.base + "/health")).json()).version, "3.8.0");
+  assert.equal((await (await fetch(f.base + "/health")).json()).version, "3.9.0");
   for (const client of [stdio, http]) {
     assert.deepEqual((await client.listTools()).tools.map((tool) => tool.name).sort(), ["figma_export", "figma_guidance", "figma_status", "figma_validate_layout"]);
     assert.equal(payload(await client.callTool({ name: "figma_status", arguments: {} })).connected, false);
@@ -99,7 +99,16 @@ test("MCP export round trip executes the real plugin filtering logic", { timeout
   assert.equal(payload(await client.callTool({ name: "figma_status", arguments: {} })).connected, true);
   const exported = await client.callTool({ name: "figma_export", arguments: {} });
   assert.notEqual(exported.isError, true);
-  assert.deepEqual(payload(exported).nodes[0].children.map((n) => n.id), ["visible"]);
+  const summary = payload(exported);
+  assert.equal(summary.root.id, "root");
+  assert.deepEqual(summary.counts, { roots: 1, nodes: 2, texts: 0, images: 0, repeatGroups: 0, reviewRequired: 0 });
+  assert.equal("nodes" in summary, false);
+  assert.equal("assets" in summary, false);
+  assert.match(summary.files.previewHtmlPath, /preview\/index\.html$/);
+  const full = JSON.parse(await readFile(summary.files.designPath, "utf8"));
+  assert.deepEqual(full.nodes[0].children.map((n) => n.id), ["visible"]);
+  await access(summary.files.previewHtmlPath);
+  await access(summary.files.generationManifestPath);
 });
 
 test("existing MCP names support Pen status, selection export, Auto Layout geometry and local image assets", { timeout: 15000 }, async (t) => {
@@ -132,7 +141,7 @@ test("existing MCP names support Pen status, selection export, Auto Layout geome
   assert.equal(status.connected, true);
   assert.equal(status.mode, "pen");
   assert.equal(status.topLevelNodes.find(node => node.id === "screen").name, "Screen");
-  const exported = await client.callTool({ name: "figma_export", arguments: { mode: "pen", penPath, nodeIds: ["screen"] } });
+  const exported = await client.callTool({ name: "figma_export", arguments: { mode: "pen", penPath, nodeIds: ["screen"], responseMode: "full" } });
   assert.notEqual(exported.isError, true, exported.content[0].text);
   const saved = payload(exported);
   assert.equal(saved.meta.sourceMode, "pen");
@@ -156,12 +165,12 @@ test("existing MCP names support Pen status, selection export, Auto Layout geome
   const unresolved = await client.callTool({ name: "figma_export", arguments: { mode: "pen", penPath, nodeIds: ["dynamic"] } });
   assert.equal(unresolved.isError, true);
   assert.match(unresolved.content[0].text, /unresolved size/);
-  const bounded = payload(await client.callTool({ name: "figma_export", arguments: { mode: "pen", penPath, nodeIds: ["dynamic"], penBounds: [{ id: "dynamic", x: 500, y: 0, width: 96.5, height: 24 }] } }));
+  const bounded = payload(await client.callTool({ name: "figma_export", arguments: { mode: "pen", penPath, nodeIds: ["dynamic"], penBounds: [{ id: "dynamic", x: 500, y: 0, width: 96.5, height: 24 }], responseMode: "full" } }));
   assert.equal(bounded.nodes[0].absoluteBounds.width, 96.5);
   const unsupported = await client.callTool({ name: "figma_export", arguments: { mode: "pen", penPath, nodeIds: ["complex"] } });
   assert.equal(unsupported.isError, true);
   assert.match(unsupported.content[0].text, /requires raster export/);
-  const rasterized = payload(await client.callTool({ name: "figma_export", arguments: { mode: "pen", penPath, nodeIds: ["complex"], penRasters: [{ id: "complex", path: join(penDir, "photo.png"), scale: 1, bounds: { id: "complex", x: 700, y: 0, width: 1, height: 1 } }] } }));
+  const rasterized = payload(await client.callTool({ name: "figma_export", arguments: { mode: "pen", penPath, nodeIds: ["complex"], penRasters: [{ id: "complex", path: join(penDir, "photo.png"), scale: 1, bounds: { id: "complex", x: 700, y: 0, width: 1, height: 1 } }], responseMode: "full" } }));
   assert.equal(rasterized.nodes[0].renderAs, "image");
   assert.equal(rasterized.nodes[0].imageBoundsSource, "pen-engine-raster");
   const wrongMode = await client.callTool({ name: "figma_validate_layout", arguments: { mode: "figma", designPath: saved.meta.designPath, actualPath: join(penDir, "not-read.json") } });
@@ -191,7 +200,7 @@ test("multiple clients reuse one service and exports are serialized with request
   const results = await Promise.all([first, second, first].map((client) => client.callTool({ name: "figma_export", arguments: {} })));
   assert.equal(maxOutstanding, 1);
   assert.equal(new Set(requests).size, 3);
-  assert.deepEqual(results.map((result) => payload(result).nodes[0].id).sort(), requests.sort());
+  assert.deepEqual(results.map((result) => payload(result).root.id).sort(), requests.sort());
 });
 
 test("disconnect fails active and queued requests, then reconnect restores exports", { timeout: 15000 }, async (t) => {
@@ -279,7 +288,7 @@ test("replacing a connected plugin fails old work and accepts the replacement", 
     const request = JSON.parse(raw.toString());
     replacement.send(JSON.stringify({ type: "done", requestId: request.requestId, data: exportData("replacement") }));
   });
-  assert.equal(payload(await client.callTool({ name: "figma_export", arguments: {} })).nodes[0].id, "replacement");
+  assert.equal(payload(await client.callTool({ name: "figma_export", arguments: {} })).root.id, "replacement");
 });
 
 test("entry detects an old service without terminating or silently reusing it", { timeout: 15000 }, async (t) => {
@@ -310,7 +319,7 @@ test("MCP returns real local image paths only after bytes are written, and valid
     for (const message of fixturePlugin.messages) socket.send(JSON.stringify(message));
   });
   const outputDir = join(f.env.FIGMA_EXPORT_DIR, "中文图片");
-  const exported = await client.callTool({ name: "figma_export", arguments: { outputDir } });
+  const exported = await client.callTool({ name: "figma_export", arguments: { outputDir, responseMode: "full" } });
   assert.notEqual(exported.isError, true, exported.content[0].text);
   const saved = payload(exported);
   assert.equal(saved.meta.exportDirectory.startsWith(outputDir + "/"), true);

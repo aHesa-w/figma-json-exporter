@@ -39,7 +39,7 @@ Both `mcp-config.json` and `mcp-config.stdio.json` use the compiled entry; repla
 ```
 
 - `figma_status`: checks the Figma plugin by default; with `mode: "pen"` it checks a local `.pen` file and lists its top-level nodes.
-- `figma_export`: exports the current Figma selection by default; with `mode: "pen"` it exports selected nodes from a `.pen` file. Both modes write images to disk first, then return the visible-node JSON and file paths.
+- `figma_export`: exports the current Figma selection by default; with `mode: "pen"` it exports selected nodes from a `.pen` file. Both modes persist the full design, assets, plans and a model-free starter preview first. MCP returns a compact roots/counts/files summary by default; pass `responseMode: "full"` only when the complete design JSON is explicitly needed in context.
 - `figma_guidance`: progressively loads implementation/inference standards by tag. Pass the `guidanceTags` carried by semantic-plan containers/repeat groups/interaction candidates, or stage tags (`workflow`/`baseline`/`flow`/`style`), layer-property tags (`image`/`gradient`/`text`/`clipping`/`mask`/`paint`) or `subagent`; omit tags to list every available tag.
 - `figma_validate_layout`: compares browser-measured rectangles against the design JSON and returns per-layer deltas plus a full report path; `mode` can assert the design source.
 
@@ -138,7 +138,7 @@ The absolute IMG offset used inside an image to preserve outside strokes/shadows
 
 New report fields: `phase`, `workflowComplete`, `baselineReportPath`, `flowMismatches`, `flowExceptions`. After the first stage passes, `nextAction` explicitly requires refactoring and a second stage. `semantic-plan.json` provides source-arrangement suggestions and does not masquerade as source or interaction acceptance; automated acceptance still does not prove pixels, responsive behavior, complete interactions or code quality. MCP enforces constraints and comparisons; HTML/CSS edits and browser execution are done by the agent, which never rewrites the user's page itself.
 
-This service version is **3.8.0**: adds `figma_guidance` for tag-based progressive loading of implementation/inference standards, tab/input style inference, and enforces "first version directly in document flow" plus "grid/flex must be justified by `layoutStrategy`" as hard constraints. The Figma plugin remains compatible with **3.4.1**. The new export bundle's **collectorVersion: 5** collector (with `sampleId`, `collectedAt` and `flowStyle`) is required. Re-export old bundles to obtain `semantic-plan.json`. After upgrading, restart the shared service and reconnect the client MCP; tool parameters and validation code already loaded in a stdio process do not update with the disk build.
+This service version is **3.9.0**: `figma_export` returns a compact summary by default, and every export adds `generation-manifest.json` plus model-free `preview/index.html` and `preview/preview.css`. The starter preview uses hierarchy, reading order, overlap and generic repeat inference; it performs no tab-specific inference, and complex structures keep their hierarchy with deterministic fallbacks. The preview is a starting artifact rather than a flow, visual or interaction acceptance claim. The Figma plugin remains compatible with **3.4.1** and the collector remains **collectorVersion: 5**. Restart the shared service and reconnect MCP clients after upgrading.
 
 ## Images land on disk first, JSON returns after
 
@@ -152,6 +152,11 @@ export-<uuid>/
   implementation.json      per-layer implementation rules, automated checks and pending visual review items
   flow-plan.json           two-stage flow, document-flow refactor suggestions and exception candidates
   semantic-plan.json       readable code order, repeat-structure loop hints, bounded interaction candidates, plus tab selected/unselected state styles and input control type/style inference
+  style-plan.json          real-CSS, static-style, reuse and deduplication requirements
+  generation-manifest.json container, background, alignment, repeat, fallback and review decisions used by the model-free preview
+  preview/
+    index.html             starter preview generated from the complete layer tree
+    preview.css            static structure, geometry, text, image and paint styles for the preview
   collect-layout.js        a DOM collector loadable by the page
   collector-expression.js  a collector expression executable by browser tools
 ```
@@ -168,7 +173,7 @@ The node tree also keeps fills, strokes, effects, radii, text, fonts, Auto Layou
 
 By default, VECTOR, BOOLEAN_OPERATION, and any GROUP whose visible descendants are all shapes are exported as 2× PNGs. Ordinary layout groups containing TEXT, FRAME or INSTANCE are not rasterized as a whole; text and layout stay as nodes.
 
-These nodes are marked `renderAs: "image"` with `assetId` and `collapsedNodeIds` and no longer carry `children`. Implement them as one atomic layer, validate its overall bounds, and do not create DOM for the merged internal paths. The PNG already contains the node's appearance and opacity; do not re-apply the same node's fill, rotation or opacity — outer container styles must still be preserved. Disable with `shapeGroupsAsImages: false`; manual export has the matching option.
+These nodes are marked `renderAs: "image"` with `assetId` and `collapsedNodeIds` and no longer carry `children`. Implement them as one atomic layer, validate its overall bounds, and do not create DOM for the merged internal paths. The PNG already contains the node's appearance and opacity; do not re-apply the same node's fill, stroke, rotation or opacity — outer container styles must still be preserved. The model-free preview follows the same rule so vector icons and charts do not acquire black/white bounding-box blocks or rectangular outlines. Disable with `shapeGroupsAsImages: false`; manual export has the matching option.
 
 PNG uses Figma's `exportAsync` with `useAbsoluteBounds: true`. v3.3 uses the union of the layout box and visual bounds as the canvas: when it exceeds the layout box, export into a temporary transparent container to preserve outside strokes/shadows, never squeezing the image canvas into the layout box. See [Figma ExportSettings](https://developers.figma.com/docs/plugins/api/ExportSettings/).
 
@@ -277,7 +282,7 @@ Every exported layer has three rectangle sets, all with `x/y/width/height/left/t
 
 The agent should run in this order:
 
-1. Figma mode: select the full artboard in Figma and open the plugin; Pen mode: obtain the `.pen` path and selected node IDs from the editor. Call `figma_export` (same name), first read `design.json`, `implementation.json`, `semantic-plan.json` and assets; implement `implementation.checks/rules` layer by layer and handle the unverified items in `review`. Do not read only the coordinate table, and do not replace exported images with characters or guessed icons.
+1. Figma mode: select the full artboard in Figma and open the plugin; Pen mode: obtain the `.pen` path and selected node IDs from the editor. Call `figma_export`, open the returned `previewHtmlPath` and read `generationManifestPath` first; inspect `design.json`, `implementation.json` and other plans only for nodes/properties identified by the preview or validation. Do not replace exported images with characters or guessed icons.
 2. When implementing, mark **every exported layer** with `data-d2c-id="source-layer-id"` and additionally mark selection roots with `data-d2c-root`. Keep the exported hierarchy; wrapper elements that are not design structure may omit IDs. An atomic image's layout container carries the layer ID, its inner IMG is marked `data-d2c-asset="assetId"` and uses `imagePlacement` — do not give the IMG a second layer ID.
 3. Load the page in a real browser and wait for fonts, images and stable layout. Execute the contents of `collector-expression.js`, or load `collect-layout.js` and call `await window.collectFigmaLayout()`, saving the return value as `actual-layout.json`.
 4. Call `figma_validate_layout({ designPath: "/.../design.json", actualPath: "/.../actual-layout.json", phase: "baseline", tolerance: 1 })`. You may also pass the `actual` object directly — exactly one of the two.

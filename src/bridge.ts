@@ -4,7 +4,7 @@ import { persistExport, type ExportOptions } from "./assets.js";
 import { exportPen, penStatus } from "./pen.js";
 
 export const SERVER_NAME = "figma-json-exporter";
-export const SERVER_VERSION = "3.8.0";
+export const SERVER_VERSION = "3.9.0";
 export const EXPORT_TIMEOUT_MS = 120_000;
 
 export interface Exporter {

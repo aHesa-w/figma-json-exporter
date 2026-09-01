@@ -39,7 +39,7 @@ node /absolute/path/to/figma-json-exporter/dist/mcp-server.js
 ```
 
 - `figma_status`：默认检查 Figma 插件；传 `mode: "pen"` 时检查本地 `.pen` 文件并列出顶层节点。
-- `figma_export`：默认导出 Figma 当前选区；传 `mode: "pen"` 时导出 `.pen` 文件中的指定节点。两种模式都先将图片写入本地，再返回可见节点 JSON 和文件路径。
+- `figma_export`：默认导出 Figma 当前选区；传 `mode: "pen"` 时导出 `.pen` 文件中的指定节点。两种模式都先将完整设计、图片、计划和模型无关基础预览写入本地；MCP 默认只返回根节点、计数和文件路径的紧凑摘要，只有显式传 `responseMode: "full"` 才返回完整设计 JSON。
 - `figma_guidance`：按标签渐进式加载实现/推断标准。传入 `semantic-plan.json` 中容器、重复组、交互候选携带的 `guidanceTags`，或阶段标签（`workflow`/`baseline`/`flow`/`style`）、图层属性标签（`image`/`gradient`/`text`/`clipping`/`mask`/`paint`）或 `subagent`；不传标签时列出全部可用标签。
 - `figma_validate_layout`：将浏览器实测矩形与设计 JSON 比较，返回逐层偏差及完整报告路径；可用 `mode` 断言设计来源。
 
@@ -138,7 +138,7 @@ Agent 调用示例（路径替换为实际文件）：
 
 新增报告字段：`phase`、`workflowComplete`、`baselineReportPath`、`flowMismatches`、`flowExceptions`。首轮通过后的 `nextAction` 会明确要求重构并进行第二轮。`semantic-plan.json` 提供源码编排建议，并不伪装成源码或交互自动验收；自动验收仍不证明像素、响应式行为、完整交互或代码质量。MCP 负责约束和比较，HTML/CSS 修改与浏览器执行由 Agent 完成，不会自行重写用户页面。
 
-本次服务版本为 **3.8.0**：新增 `figma_guidance` 按标签渐进式加载实现/推断标准、tab/input 样式推断，并把「第一版直接文档流」与「grid/flex 必须被 `layoutStrategy` 证明」列为强约束。Figma 插件仍兼容 **3.4.1**。必须使用新导出包中的 **collectorVersion: 5** 采集器（包含 `sampleId`、`collectedAt` 和 `flowStyle`）。旧导出包应重新导出以获得 `semantic-plan.json`。升级后需重启共享服务，并重新连接客户端 MCP；已有 stdio 进程中的工具参数和校验代码不会随磁盘构建自动更新。
+本次服务版本为 **3.9.0**：`figma_export` 默认返回紧凑摘要，导出包新增 `generation-manifest.json` 和不依赖模型的 `preview/index.html`、`preview/preview.css`。预览按层级、阅读顺序、重叠关系和通用重复结构生成；不专门推断 Tab，复杂结构保留层级并使用确定性 fallback。预览只是后续实现的基础，不要求直接通过 flow，也不替代 baseline、flow、视觉或交互验收。Figma 插件仍兼容 **3.4.1**，采集器版本仍为 **collectorVersion: 5**。升级后需重启共享服务，并重新连接客户端 MCP；已有 stdio 进程中的工具参数和代码不会随磁盘构建自动更新。
 
 ## 图片先落盘，JSON 后返回
 
@@ -152,11 +152,16 @@ export-<uuid>/
   implementation.json      逐层实现规则、自动检查和待视觉复核项
   flow-plan.json           两阶段流程、文档流重构建议和例外候选
   semantic-plan.json       可读代码顺序、重复结构循环提示、有边界的交互候选，以及 tab 选中/未选中态样式与 input 控件类型/样式推断
+  style-plan.json          CSS 文件、静态样式、复用规则与去重要求
+  generation-manifest.json 模型无关预览采用的容器、背景、对齐、循环、fallback 与待复核决策
+  preview/
+    index.html             完整图层树生成的基础预览，可通过本地 HTTP 打开
+    preview.css            预览的静态结构、几何、文字、图片与绘制样式
   collect-layout.js        页面可加载的 DOM 采集器
   collector-expression.js  浏览器工具可执行的采集表达式
 ```
 
-节点树还保留填充、描边、效果、圆角、文本、字体、Auto Layout、约束和组件引用。图片字节从 Figma 插件传至本机服务，所有文件写完后才发布目录并返回结果。缺图、读取失败、未知图片格式或写入失败都会使导出失败，不能返回假路径。支持 PNG/JPEG/GIF/WebP 原图；单张图片字节上限 32MB，单次累计 128MB，导出超时 120 秒。
+节点树还保留填充、描边、效果、圆角、文本、字体、Auto Layout、约束和组件引用。基础预览保留每个 `data-d2c-id`，将明显覆盖父容器且位于内容下方的视觉层标为背景；非重叠序列使用 block/inline/flex，重叠和二维关系使用 grid-overlay 默认方案。通用相似结构写入 repeat 元数据并保留展开 HTML；不生成 Tab 专用行为。`renderAs: "image"` 的原子矢量由 PNG 表达真实轮廓，预览不会再把其 fill、stroke、旋转或透明度重复应用到矩形包围盒，避免图标周围出现黑白色块和伪边框。图片字节从 Figma 插件传至本机服务，所有文件写完后才原子发布目录并返回结果。缺图、读取失败、未知图片格式或写入失败都会使导出失败，不能返回假路径。支持 PNG/JPEG/GIF/WebP 原图；单张图片字节上限 32MB，单次累计 128MB，导出超时 120 秒。
 
 - `meta.schemaVersion = 3`；`meta.designPath`、`meta.layoutPath`、`meta.semanticPlanPath` 等为本机绝对路径。
 - `meta.exporterVersion = "3.4.1"` 标识新版插件已加载；升级后应关闭并重新打开 Figma 插件。服务会拒绝旧插件的导出，避免静默漏掉新增属性与字体/图片处理；旧版 v3 JSON 仍可用于校验诊断。
@@ -277,7 +282,7 @@ Figma 的 `absoluteRenderBounds` 允许为 `null`，不能仅凭此认定图层�
 
 Agent 应按以下顺序执行：
 
-1. Figma 模式在 Figma 选择完整画板并打开插件；Pen 模式从编辑器取得 `.pen` 路径和选中节点 ID。调用同名 `figma_export`，先读取 `design.json`、`implementation.json`、`semantic-plan.json` 和资源；逐层落实 `implementation.checks/rules`，处理 `review` 中的未验证属性。不能只读坐标表，也不能用字符或猜测图标替代已导出的图片。
+1. Figma 模式在 Figma 选择完整画板并打开插件；Pen 模式从编辑器取得 `.pen` 路径和选中节点 ID。调用同名 `figma_export`，先打开返回摘要里的 `previewHtmlPath` 并读取 `generationManifestPath`；只针对预览或校验指出的问题，再按节点读取 `design.json`、`implementation.json` 和其他计划。不能用字符或猜测图标替代已导出的图片。
 2. 实现时为**每个导出图层**标记 `data-d2c-id="源图层 ID"`，选区根节点额外标记 `data-d2c-root`。保留导出层级；非设计结构的包装元素可不加 ID。原子图片的布局容器带图层 ID，内部 IMG 标记 `data-d2c-asset="assetId"` 并使用 `imagePlacement`，不再给 IMG 添加另一份图层 ID。
 3. 用实际浏览器加载页面，等待字体、图片和稳定布局。执行 `collector-expression.js` 的内容，或加载 `collect-layout.js` 后调用 `await window.collectFigmaLayout()`，保存返回值为 `actual-layout.json`。
 4. 调用 `figma_validate_layout({ designPath: "/.../design.json", actualPath: "/.../actual-layout.json", phase: "baseline", tolerance: 1 })`。也可直接传 `actual` 对象，两种方式二选一。

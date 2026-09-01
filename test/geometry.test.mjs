@@ -237,6 +237,14 @@ test("asset export is atomic, preserves actual formats and never uses untrusted 
   assert.equal(requirements.layers[1].checks.includes("image-reference"), true);
   const layout = JSON.parse(await readFile(saved.meta.layoutPath, "utf8"));
   assert.deepEqual(layout[1].implementation, disk.nodes[0].children[0].implementation);
+  const preview = await readFile(saved.meta.previewHtmlPath, "utf8");
+  const previewCSS = await readFile(saved.meta.previewCssPath, "utf8");
+  const generation = JSON.parse(await readFile(saved.meta.generationManifestPath, "utf8"));
+  assert.match(preview, /data-d2c-root="true"/);
+  assert.match(preview, /\.\/preview\.css/);
+  assert.match(previewCSS, /Deterministic model-free preview/);
+  assert.equal(generation.renderer, "deterministic-preview-v1");
+  assert.equal(preview.includes("style="), false);
   assert.deepEqual((await readdir(dir)).filter((n) => n.startsWith(".export")), []);
 });
 

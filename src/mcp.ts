@@ -4,7 +4,7 @@ import { SERVER_NAME, SERVER_VERSION, type Exporter } from "./bridge.js";
 import { z } from "zod";
 import { readFile } from "node:fs/promises";
 import { isAbsolute } from "node:path";
-import { validateFiles } from "./assets.js";
+import { summarizeExport, validateFiles } from "./assets.js";
 import { WORKFLOW_INSTRUCTIONS } from "./flow.js";
 import { guidanceFor, guidanceTags } from "./guidance.js";
 import type { ActualLayout } from "./geometry.js";
@@ -43,7 +43,7 @@ export function createMCPServer(exporter: Exporter): McpServer {
     return guidanceFor(args.tags);
   }));
   server.registerTool("figma_export", {
-    description: "Export visible design layers while keeping this existing tool name. Default mode=figma reads the live plugin selection. mode=pen reads a local .pen document, optionally restricted by nodeIds, computes fixed/Auto Layout geometry and copies referenced local images. Writes design.json, layout.json, implementation.json, flow-plan.json, semantic-plan.json, style-plan.json and DOM collectors before returning. semantic-plan provides readable code order, lightweight layout strategies, repeat/loop hints, bounded inferred interactions, tab selected/unselected state styles and input control type/style inference. style-plan requires a real CSS file, forbids static inline styles and identifies reusable rule groups. For unresolved Pen engine geometry pass penBounds; values are never guessed.",
+    description: "Export visible design layers while keeping this existing tool name. Default mode=figma reads the live plugin selection. mode=pen reads a local .pen document. Writes the full design/plans/assets plus generation-manifest.json and a model-free preview/index.html + preview.css. The default tool response is a compact summary with counts and file paths; use responseMode=full only when the caller truly needs the full design in context.",
     inputSchema: {
       mode: z.enum(["figma", "pen"]).optional().describe("Design source; defaults to figma."),
       penPath: z.string().refine(isAbsolute, "Use an absolute .pen path").optional().describe("Required with mode=pen."),
@@ -52,12 +52,14 @@ export function createMCPServer(exporter: Exporter): McpServer {
       penRasters: z.array(z.object({ id: z.string().min(1), path: z.string().refine(isAbsolute), scale: z.number().positive().max(4).optional(), bounds: z.object({ id: z.string().min(1), x: z.number(), y: z.number(), width: z.number().nonnegative(), height: z.number().nonnegative() }).optional() })).optional().describe("Pen mode only: exact PNGs exported by the Pen engine for compound shapes, unusual fonts or unsupported paints. bounds may include outside strokes/effects; scale defaults to 1."),
       outputDir: z.string().refine(isAbsolute, "Use an absolute directory").optional().describe("Parent directory for a new export bundle; defaults to ~/Downloads/figma-json-exporter. Existing files are not overwritten."),
       shapeGroupsAsImages: z.boolean().optional().describe("Default true: collapse pure shape groups, boolean operations and vectors into PNG image layers."),
+      responseMode: z.enum(["summary", "full"]).optional().describe("Default summary returns roots/counts/file paths without embedding the full design. full is an explicit compatibility/debug escape hatch."),
     },
   }, async (args, extra) => result(() => {
-    const penOnly = args.penPath || args.nodeIds || args.penBounds || args.penRasters;
+    const { responseMode, ...exportOptions } = args;
+    const penOnly = exportOptions.penPath || exportOptions.nodeIds || exportOptions.penBounds || exportOptions.penRasters;
     if ((args.mode ?? "figma") !== "pen" && penOnly) throw new Error("penPath/nodeIds/penBounds/penRasters require mode=pen");
     if (args.mode === "pen" && !args.penPath) throw new Error("mode=pen requires penPath");
-    return exporter.export(extra.signal, args);
+    return exporter.export(extra.signal, exportOptions).then(data => responseMode === "full" ? data : summarizeExport(data));
   }));
   server.registerTool("figma_validate_layout", {
     description: "Two-stage validation: phase=baseline first; after success refactor real HTML/CSS into flex/grid/block document flow and remeasure, then phase=flow with baselineReportPath. Only workflowComplete=true completes both automated stages. Compare actual browser DOM rectangles with an exported design.json. Returns pass/fail, missing/duplicate/unexpected IDs, hierarchy mismatches, propertyMismatches (clipping, opacity, radii, text metrics, gradient direction/stops), reviewRequired, and per-layer left/top/right/bottom/width/height deltas and a saved full report. Fix failed layers parent-first, rerender and repeat until passed; do not claim completion on failure. Actual data must come from the exported collector, not estimates.",

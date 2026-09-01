@@ -6,6 +6,7 @@ import { COLLECTOR_VERSION, collectLayout, flattenLayers, prepareDesign, rect, v
 import { flowPlan, validateFlow, WORKFLOW_INSTRUCTIONS, type ValidationOptions } from "./flow.js";
 import { semanticPlan, SEMANTIC_INSTRUCTIONS } from "./semantics.js";
 import { stylePlan, STYLE_INSTRUCTIONS } from "./styles.js";
+import { generatePreview } from "./preview.js";
 
 export interface PenBounds { id: string; x: number; y: number; width: number; height: number }
 export interface PenRaster { id: string; path: string; scale?: number; bounds?: PenBounds }
@@ -20,6 +21,43 @@ export interface ExportOptions {
 }
 export interface AssetBytes { id: string; bytes: Buffer }
 const finitePositive = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value > 0;
+
+export function summarizeExport(input: unknown) {
+  const design = prepareDesign(input);
+  const layers = flattenLayers(design);
+  const roots = design.nodes.map(root => ({ id: root.id, name: root.name, type: root.type, width: root.absoluteBounds.width, height: root.absoluteBounds.height }));
+  const meta = design.meta;
+  return {
+    exportId: meta.exportId,
+    source: { mode: meta.sourceMode ?? "figma", version: meta.sourceVersion ?? meta.exporterVersion },
+    root: roots.length === 1 ? roots[0] : null,
+    roots,
+    counts: {
+      roots: roots.length,
+      nodes: layers.length,
+      texts: layers.filter(layer => layer.type === "TEXT").length,
+      images: Object.keys(design.assets ?? {}).length,
+      repeatGroups: semanticPlan(design).repeatGroups.length,
+      reviewRequired: generatePreview(design).manifest.reviewRequired.length,
+    },
+    files: {
+      exportDirectory: meta.exportDirectory,
+      designPath: meta.designPath,
+      layoutPath: meta.layoutPath,
+      implementationPath: meta.implementationPath,
+      flowPlanPath: meta.flowPlanPath,
+      semanticPlanPath: meta.semanticPlanPath,
+      stylePlanPath: meta.stylePlanPath,
+      generationManifestPath: meta.generationManifestPath,
+      previewHtmlPath: meta.previewHtmlPath,
+      previewCssPath: meta.previewCssPath,
+      collectorPath: meta.collectorPath,
+      collectorExpressionPath: meta.collectorExpressionPath,
+    },
+    warnings: { raster: Array.isArray(meta.rasterWarnings) ? meta.rasterWarnings.length : 0 },
+    nextAction: "Open previewHtmlPath for the model-free starting preview. Read generationManifestPath for inferred structure; use designPath only for targeted implementation or validation details.",
+  };
+}
 
 export function imageFormat(bytes: Buffer): { extension: string; mimeType: string } {
   if (bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) return { extension: "png", mimeType: "image/png" };
@@ -87,6 +125,10 @@ export async function persistExport(input: unknown, assets: Map<string, Buffer>,
     design.meta.flowPlanPath = join(directory, "flow-plan.json");
     design.meta.semanticPlanPath = join(directory, "semantic-plan.json");
     design.meta.stylePlanPath = join(directory, "style-plan.json");
+    design.meta.generationManifestPath = join(directory, "generation-manifest.json");
+    design.meta.previewDirectory = join(directory, "preview");
+    design.meta.previewHtmlPath = join(directory, "preview", "index.html");
+    design.meta.previewCssPath = join(directory, "preview", "preview.css");
     design.meta.collectorPath = join(directory, "collect-layout.js");
     design.meta.collectorExpressionPath = join(directory, "collector-expression.js");
     design.meta.validation = { attribute: "data-d2c-id", rootAttribute: "data-d2c-root", coordinateSpace: "root-relative", tolerance: 1, required: true, collectorVersion: COLLECTOR_VERSION, propertyChecksRequired: true, visualReviewRequired: true, phases: ["baseline", "flow"], instructions: WORKFLOW_INSTRUCTIONS };
@@ -94,6 +136,11 @@ export async function persistExport(input: unknown, assets: Map<string, Buffer>,
     await writeFile(join(staging, "flow-plan.json"), JSON.stringify(flowPlan(design), null, 2));
     await writeFile(join(staging, "semantic-plan.json"), JSON.stringify(semanticPlan(design), null, 2));
     await writeFile(join(staging, "style-plan.json"), JSON.stringify(stylePlan(design), null, 2));
+    const preview = generatePreview(design);
+    await writeFile(join(staging, "generation-manifest.json"), JSON.stringify(preview.manifest, null, 2));
+    await mkdir(join(staging, "preview"));
+    await writeFile(join(staging, "preview", "index.html"), preview.html);
+    await writeFile(join(staging, "preview", "preview.css"), preview.css);
     await writeFile(join(staging, "implementation.json"), JSON.stringify({ workflow: WORKFLOW_INSTRUCTIONS, semantics: SEMANTIC_INSTRUCTIONS, styles: STYLE_INSTRUCTIONS, instructions: "Read design.json for source values. Follow each layer's rules and checks; never silently drop properties. Review items are NOT automatically verified. passed=true only covers automated checks, not full visual acceptance.", layers: layers.map(({ id, name, implementation }) => ({ id, name, ...implementation })) }, null, 2));
     await writeFile(join(staging, "collect-layout.js"), `window.collectFigmaLayout = ${collectLayout.toString()};\n`);
     await writeFile(join(staging, "collector-expression.js"), `(${collectLayout.toString()})()`);
