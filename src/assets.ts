@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { COLLECTOR_VERSION, collectLayout, flattenLayers, prepareDesign, rect, validateLayout, type ActualLayout } from "./geometry.js";
 import { flowPlan, validateFlow, WORKFLOW_INSTRUCTIONS, type ValidationOptions } from "./flow.js";
 import { semanticPlan, SEMANTIC_INSTRUCTIONS } from "./semantics.js";
@@ -20,7 +20,20 @@ export interface ExportOptions {
   penRasters?: PenRaster[];
 }
 export interface AssetBytes { id: string; bytes: Buffer }
+export interface PreviewAssessmentItem { description: string; nodeIds: string[] }
+export interface PreviewAssessment {
+  summary: string;
+  preserve: PreviewAssessmentItem[];
+  gaps: Array<PreviewAssessmentItem & { action: string }>;
+}
 const finitePositive = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value > 0;
+const previewGate = (meta: Record<string, any>) => ({
+  status: "PREVIEW_ASSESSMENT_REQUIRED",
+  blocking: true,
+  requiredTool: "figma_assess_preview",
+  requiredReads: [meta.previewHtmlPath, meta.previewCssPath, meta.generationManifestPath],
+  instruction: "Open the generated preview and assess it as the first implementation candidate BEFORE writing code. Preserve correct preview decisions; change only identified gaps. Baseline validation requires the returned previewAssessmentPath.",
+});
 
 export function summarizeExport(input: unknown) {
   const design = prepareDesign(input);
@@ -55,8 +68,57 @@ export function summarizeExport(input: unknown) {
       collectorExpressionPath: meta.collectorExpressionPath,
     },
     warnings: { raster: Array.isArray(meta.rasterWarnings) ? meta.rasterWarnings.length : 0 },
-    nextAction: "Open previewHtmlPath for the model-free starting preview. Read generationManifestPath for inferred structure; use designPath only for targeted implementation or validation details.",
+    generationGate: previewGate(meta),
+    nextAction: "STOP before coding: open previewHtmlPath, read previewCssPath and generationManifestPath, then call figma_assess_preview with concrete preserve/gap observations tied to exported node IDs. Do not start over from design.json.",
   };
+}
+
+const digest = (source: string | Buffer) => createHash("sha256").update(source).digest("hex");
+
+export async function assessPreview(designPath: string, assessment: PreviewAssessment) {
+  if (!isAbsolute(designPath)) throw new Error("designPath must be absolute");
+  const designSource = await readFile(designPath, "utf8");
+  const design = prepareDesign(JSON.parse(designSource));
+  const htmlPath = design.meta.previewHtmlPath, cssPath = design.meta.previewCssPath, manifestPath = design.meta.generationManifestPath;
+  if (typeof htmlPath !== "string" || typeof cssPath !== "string" || typeof manifestPath !== "string" || ![htmlPath, cssPath, manifestPath].every(isAbsolute)) throw new Error("This export has no complete preview paths; export again with the current service");
+  const ids = new Set(flattenLayers(design).map(layer => layer.id));
+  const items = [...assessment.preserve, ...assessment.gaps];
+  const referenced = new Set(items.flatMap(item => item.nodeIds));
+  const unknown = [...referenced].filter(id => !ids.has(id));
+  if (unknown.length) throw new Error(`Preview assessment references unknown node IDs: ${unknown.join(", ")}`);
+  if (!assessment.preserve.length || !assessment.gaps.length || !referenced.size) throw new Error("Preview assessment must identify at least one preserved decision, one gap/action, and exported node IDs");
+  const [html, css, manifest] = await Promise.all([readFile(htmlPath), readFile(cssPath), readFile(manifestPath)]);
+  const receipt = {
+    reportFormat: "figma-preview-assessment-v1",
+    status: "accepted",
+    reviewedAt: new Date().toISOString(),
+    designPath,
+    designDigest: digest(designSource),
+    exportId: design.meta.exportId,
+    reviewedFiles: [
+      { path: htmlPath, sha256: digest(html) },
+      { path: cssPath, sha256: digest(css) },
+      { path: manifestPath, sha256: digest(manifest) },
+    ],
+    assessment,
+  };
+  const previewAssessmentPath = join(dirname(designPath), "preview-assessment.json");
+  await writeFile(previewAssessmentPath, JSON.stringify(receipt, null, 2));
+  return {
+    status: "accepted",
+    previewAssessmentPath,
+    assessedNodeCount: referenced.size,
+    preserveCount: assessment.preserve.length,
+    gapCount: assessment.gaps.length,
+    nextAction: "Use the deterministic preview as the implementation base. Preserve assessed strengths, make the listed targeted changes, then call figma_validate_layout phase=baseline with this previewAssessmentPath.",
+  };
+}
+
+async function verifyPreviewAssessment(designPath: string, designSource: string, previewAssessmentPath: string) {
+  if (!isAbsolute(previewAssessmentPath)) throw new Error("previewAssessmentPath must be absolute");
+  const receipt = JSON.parse(await readFile(previewAssessmentPath, "utf8"));
+  if (receipt.reportFormat !== "figma-preview-assessment-v1" || receipt.status !== "accepted" || receipt.designPath !== designPath || receipt.designDigest !== digest(designSource)) throw new Error("previewAssessmentPath must be an accepted figma_assess_preview receipt for this unchanged designPath");
+  return receipt;
 }
 
 export function imageFormat(bytes: Buffer): { extension: string; mimeType: string } {
@@ -73,7 +135,7 @@ export async function persistExport(input: unknown, assets: Map<string, Buffer>,
   signal?.throwIfAborted();
   const design = prepareDesign(input);
   const sourceMode = design.meta.sourceMode ?? "figma";
-  if (sourceMode === "figma" && design.meta.exporterVersion !== "3.4.1") throw new Error("Figma plugin v3.4.1 is required for complete rendering-property exports. Close and reopen JSON Exporter, then export again");
+  if (sourceMode === "figma" && design.meta.exporterVersion !== "3.5.0") throw new Error("Figma plugin v3.5.0 is required for styled text range exports. Close and reopen JSON Exporter, then export again");
   if (sourceMode !== "figma" && sourceMode !== "pen") throw new Error(`Unsupported design source: ${sourceMode}`);
   const output = options.outputDir ?? process.env.FIGMA_EXPORT_DIR ?? join(homedir(), "Downloads", "figma-json-exporter");
   if (!isAbsolute(output)) throw new Error("outputDir must be an absolute local directory");
@@ -131,7 +193,8 @@ export async function persistExport(input: unknown, assets: Map<string, Buffer>,
     design.meta.previewCssPath = join(directory, "preview", "preview.css");
     design.meta.collectorPath = join(directory, "collect-layout.js");
     design.meta.collectorExpressionPath = join(directory, "collector-expression.js");
-    design.meta.validation = { attribute: "data-d2c-id", rootAttribute: "data-d2c-root", coordinateSpace: "root-relative", tolerance: 1, required: true, collectorVersion: COLLECTOR_VERSION, propertyChecksRequired: true, visualReviewRequired: true, phases: ["baseline", "flow"], instructions: WORKFLOW_INSTRUCTIONS };
+    design.meta.generationGate = previewGate(design.meta);
+    design.meta.validation = { attribute: "data-d2c-id", rootAttribute: "data-d2c-root", coordinateSpace: "root-relative", tolerance: 1, required: true, collectorVersion: COLLECTOR_VERSION, previewAssessmentRequired: true, requiredAssessmentTool: "figma_assess_preview", propertyChecksRequired: true, visualReviewRequired: true, phases: ["baseline", "flow"], instructions: WORKFLOW_INSTRUCTIONS };
     await writeFile(join(staging, "layout.json"), JSON.stringify(layers.map(({ id, name, type, parentId, rootId, depth, absoluteBounds, relativeBounds, localBounds, renderAs, assetId, imageBounds, imagePlacement, relativeImageBounds, imageBoundsSource, gradient, implementation }) => ({ id, name, type, parentId, rootId, depth, absoluteBounds, relativeBounds, localBounds, renderAs, assetId, imageBounds, imagePlacement, relativeImageBounds, imageBoundsSource, gradient, implementation })), null, 2));
     await writeFile(join(staging, "flow-plan.json"), JSON.stringify(flowPlan(design), null, 2));
     await writeFile(join(staging, "semantic-plan.json"), JSON.stringify(semanticPlan(design), null, 2));
@@ -164,6 +227,7 @@ export async function validateFiles(designPath: string, actual: ActualLayout, to
   if (typeof actual.sampleId !== "string" || !actual.sampleId || !Number.isFinite(Date.parse(actual.collectedAt ?? ""))) throw new Error("Use the NEW collector with sampleId and collectedAt; do not reuse or invent measurements");
   if (!actual.viewport || ![actual.viewport.width, actual.viewport.height, actual.viewport.devicePixelRatio].every(v => Number.isFinite(v) && v > 0)) throw new Error("Use the NEW collector with a valid viewport and devicePixelRatio for both stages");
   if (phase === "baseline" && (options.baselineReportPath || options.flowExceptions?.length)) throw new Error("baselineReportPath/flowExceptions are only valid for phase=flow");
+  const previewAssessment = options.previewAssessmentPath ? await verifyPreviewAssessment(designPath, source, options.previewAssessmentPath) : null;
   let baseline: any;
   let effectiveTolerance = tolerance ?? 1;
   if (phase === "flow") {
@@ -182,7 +246,7 @@ export async function validateFiles(designPath: string, actual: ActualLayout, to
   const passed = report.passed && (flow?.passed ?? true);
   const stage = { reportFormat: "figma-two-stage-v1", phase, passed, workflowComplete: phase === "flow" && passed,
     scope: report.scope + (phase === "flow" ? "; additionally checks document-flow positioning conventions, not source-code quality or responsive behavior" : ""),
-    baselineReportPath: options.baselineReportPath ?? null, flowMismatches: flow?.mismatches ?? [], flowExceptions: flow?.exceptions ?? [],
+    baselineReportPath: options.baselineReportPath ?? null, previewAssessmentPath: previewAssessment?.designPath ? options.previewAssessmentPath : baseline?.previewAssessmentPath ?? null, flowMismatches: flow?.mismatches ?? [], flowExceptions: flow?.exceptions ?? [],
     nextAction: !report.passed ? report.nextAction : phase === "baseline" ? "Baseline passed. Save this reportPath, refactor real HTML/CSS to flex/grid/block document flow, then collect a NEW browser sample at the same viewport and call phase=flow with baselineReportPath. Do not stop at baseline success." : !flow!.passed ? "Fix flowMismatches without regressing geometry/styles; remeasure the refactored page and retry phase=flow with the same baselineReportPath." : "Both automated stages passed. Review flowExceptions, reviewRequired, responsive behavior and visual/interaction fidelity separately." };
   // Reports go to a separate local audit directory, never overwrite the design.
   const output = process.env.FIGMA_VALIDATION_DIR ?? join(homedir(), "Downloads", "figma-json-exporter", "validation");

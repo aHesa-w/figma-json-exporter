@@ -199,6 +199,28 @@ test("letter spacing has unit-safe CSS and extended mixed text is rasterized", a
   for (const n of mixed) assert.equal(n.rasterReason, "mixed-text-style");
 });
 
+test("supported mixed text colors export styled ranges instead of a raster", async () => {
+  const mixed = node("mixed-color", {
+    type: "TEXT", characters: "Get 10 tickets", fills: "Symbol(mixed)",
+    getStyledTextSegments(fields) {
+      assert.deepEqual(Array.from(fields), ["fontName", "fontSize", "fontWeight", "lineHeight", "letterSpacing", "textDecoration", "textCase", "fills"]);
+      const style = (color) => ({ fontName: { family: "Arial", style: "Regular" }, fontSize: 16, fontWeight: 400, lineHeight: { unit: "PIXELS", value: 16 }, letterSpacing: { unit: "PIXELS", value: 0 }, textDecoration: "NONE", textCase: "ORIGINAL", fills: [{ type: "SOLID", color }] });
+      return [
+        { start: 0, end: 4, characters: "Get ", ...style({ r: 0, g: 0, b: 0 }) },
+        { start: 4, end: 6, characters: "10", ...style({ r: 1, g: 0.2, b: 0 }) },
+        { start: 6, end: 14, characters: " tickets", ...style({ r: 0, g: 0, b: 0 }) },
+      ];
+    },
+  });
+  const result = await pluginFixture([mixed]).request();
+  const exported = result.data.nodes[0];
+  assert.equal(exported.renderAs, undefined);
+  assert.equal(exported.assetId, undefined);
+  assert.equal(exported.styledTextSegments.length, 3);
+  assert.equal(exported.styledTextSegments.map(segment => segment.characters).join(""), mixed.characters);
+  assert.equal(exported.styledTextSegments[1].textColor.css, "rgba(255,51,0,1)");
+});
+
 test("AUTO uses only explicit Figma CSS pixels; unavailable or ambiguous metrics rasterize", async () => {
   const values = ["24.5px", "normal", "120%", "1.2", "var(--leading)", "", "0px"];
   const result = await pluginFixture(values.map((value, i) => node(String(i), { type: "TEXT", height: 300, lineHeight: { unit: "AUTO" }, async getCSSAsync() { return { "line-height": value }; } }))).request();

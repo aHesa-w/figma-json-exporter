@@ -134,15 +134,28 @@ function paintCSS(node: Layer, design: Design): string[] {
   return rules;
 }
 
-function textCSS(node: Layer): string[] {
-  if (node.type !== "TEXT") return [];
-  const font = record(node.fontName), lineHeight = record(node.lineHeight), letterSpacing = record(node.letterSpacing);
-  const rules = ["white-space:pre-wrap", "overflow-wrap:anywhere"];
+function textStyleCSS(value: Record<string, unknown>): string[] {
+  const font = record(value.fontName), lineHeight = record(value.lineHeight), letterSpacing = record(value.letterSpacing), textColor = record(value.textColor);
+  const rules: string[] = [];
   if (typeof font?.family === "string") rules.push(`font-family:${JSON.stringify(font.family)}`);
-  if (typeof node.fontSize === "number") rules.push(`font-size:${px(node.fontSize)}`);
-  if (typeof node.fontWeight === "number") rules.push(`font-weight:${node.fontWeight}`);
+  if (typeof value.fontSize === "number") rules.push(`font-size:${px(value.fontSize)}`);
+  if (typeof value.fontWeight === "number") rules.push(`font-weight:${value.fontWeight}`);
   if (typeof lineHeight?.css === "string") rules.push(`line-height:${lineHeight.css}`);
   if (typeof letterSpacing?.css === "string") rules.push(`letter-spacing:${letterSpacing.css}`);
+  if (typeof textColor?.css === "string") rules.push(`color:${textColor.css}`);
+  const decoration = { UNDERLINE: "underline", STRIKETHROUGH: "line-through", NONE: "none" }[String(value.textDecoration)] as string | undefined;
+  if (decoration) rules.push(`text-decoration-line:${decoration}`);
+  const textTransform = { UPPER: "uppercase", LOWER: "lowercase", TITLE: "capitalize", ORIGINAL: "none" }[String(value.textCase)] as string | undefined;
+  if (textTransform) rules.push(`text-transform:${textTransform}`);
+  return rules;
+}
+
+function textCSS(node: Layer): string[] {
+  if (node.type !== "TEXT") return [];
+  // Preserve explicit source newlines without introducing browser soft-wraps.
+  // `pre-wrap` + `anywhere` incorrectly broke selectable styled text merely
+  // because its measured Figma box was narrower than the browser glyph run.
+  const rules = ["white-space:pre", "overflow-wrap:normal", "word-break:normal", ...textStyleCSS(node)];
   if (typeof node.textAlignHorizontal === "string") rules.push(`text-align:${node.textAlignHorizontal.toLowerCase()}`);
   return rules;
 }
@@ -191,6 +204,10 @@ export function generatePreview(input: unknown): PreviewBundle {
     placementDecisions.push({ id: node.id, parentId: node.parentId, role: roleById.get(node.id) ?? "content", alignment: align });
     const rules = [`width:${px(node.absoluteBounds.width)}`, `height:${px(node.absoluteBounds.height)}`, ...placementCSS(node, parent, parentPrimitive, index > 0 ? siblings[index - 1] : null, align), ...paintCSS(node, design), ...textCSS(node)];
     cssRules.push(`.${classById.get(node.id)} { ${rules.join("; ")}; }`);
+    if (Array.isArray(node.styledTextSegments)) node.styledTextSegments.forEach((segment, segmentIndex) => {
+      const style = record(segment);
+      if (style) cssRules.push(`.${classById.get(node.id)}-text-${segmentIndex + 1} { ${textStyleCSS(style).join("; ")}; }`);
+    });
     if (node.renderAs === "image") {
       const box = node.imagePlacement ?? { x: 0, y: 0, width: node.absoluteBounds.width, height: node.absoluteBounds.height };
       cssRules.push(`.${classById.get(node.id)} > .d2c-asset { left:${px(box.x)}; top:${px(box.y)}; width:${px(box.width)}; height:${px(box.height)}; }`);
@@ -205,7 +222,9 @@ export function generatePreview(input: unknown): PreviewBundle {
 
   const render = (node: Layer, root = false): string => {
     const children = orderedById.get(node.id) ?? node.children ?? [];
+    const textSegments = Array.isArray(node.styledTextSegments) ? node.styledTextSegments.map(record).filter((segment): segment is Record<string, unknown> => Boolean(segment)) : [];
     const body = node.renderAs === "image" ? imageMarkup(node, design)
+      : node.type === "TEXT" && textSegments.length ? textSegments.map((segment, segmentIndex) => `<span class="d2c-text-segment ${classById.get(node.id)}-text-${segmentIndex + 1}" data-d2c-text-start="${esc(segment.start)}" data-d2c-text-end="${esc(segment.end)}">${esc(segment.characters)}</span>`).join("")
       : node.type === "TEXT" ? esc(node.characters)
       : children.length ? `<div class="d2c-children">${children.map(child => render(child)).join("")}</div>` : "";
     const repeat = semantics.repeatGroups.find(group => group.instanceIds.includes(node.id));
@@ -226,7 +245,7 @@ export function generatePreview(input: unknown): PreviewBundle {
   });
   const title = design.nodes.map(root => root.name).join(" + ") || "D2C Preview";
   const html = `<!doctype html>\n<html lang="zh-CN">\n<head>\n<meta charset="utf-8">\n<meta name="viewport" content="width=device-width,initial-scale=1">\n<title>${esc(title)} · D2C Preview</title>\n<link rel="stylesheet" href="./preview.css">\n</head>\n<body>\n<main class="d2c-preview">${design.nodes.map(root => `<section class="d2c-root-shell">${render(root, true)}</section>`).join("")}</main>\n</body>\n</html>\n`;
-  const css = `/* Deterministic model-free preview. It is a starting point, not final flow or visual acceptance. */\n* { box-sizing:border-box; }\nhtml, body { margin:0; min-height:100%; }\nbody { background:#f3f4f6; color:#111; font-family:Arial, sans-serif; }\n.d2c-preview { display:flex; flex-direction:column; align-items:center; gap:24px; padding:24px; }\n.d2c-root-shell { flex:none; box-shadow:0 8px 32px rgba(0,0,0,.12); }\n.d2c-node { position:relative; min-width:0; min-height:0; overflow:visible; flex:none; }\n.d2c-children { position:relative; min-width:0; min-height:0; }\n.d2c-asset { position:absolute; max-width:none; object-fit:fill; opacity:1; }\n${cssRules.join("\n")}\n`;
+  const css = `/* Deterministic model-free preview. It is a starting point, not final flow or visual acceptance. */\n* { box-sizing:border-box; }\nhtml, body { margin:0; min-height:100%; }\nbody { background:#f3f4f6; color:#111; font-family:Arial, sans-serif; }\n.d2c-preview { display:flex; flex-direction:column; align-items:center; gap:24px; padding:24px; }\n.d2c-root-shell { flex:none; box-shadow:0 8px 32px rgba(0,0,0,.12); }\n.d2c-node { position:relative; min-width:0; min-height:0; overflow:visible; flex:none; }\n.d2c-children { position:relative; min-width:0; min-height:0; }\n.d2c-asset { position:absolute; max-width:none; object-fit:fill; opacity:1; }\n.d2c-text-segment { white-space:inherit; }\n${cssRules.join("\n")}\n`;
 
   return {
     html, css,

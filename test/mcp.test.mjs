@@ -62,16 +62,16 @@ async function fixture(t) {
   return { base, entry, env, client, plugin };
 }
 
-const exportData = (id = "fixture") => ({ meta: { schemaVersion: 3, exporterVersion: "3.4.1" }, assets: {}, nodes: [{ id, name: id, type: "FRAME", absoluteBounds: { x: 10, y: 20, width: 100, height: 100 } }] });
+const exportData = (id = "fixture") => ({ meta: { schemaVersion: 3, exporterVersion: "3.5.0" }, assets: {}, nodes: [{ id, name: id, type: "FRAME", absoluteBounds: { x: 10, y: 20, width: 100, height: 100 } }] });
 const payload = (result) => JSON.parse(result.content[0].text);
 
 test("standalone compiled entry auto-starts shared service; stdio and HTTP expose MCP tools/errors", { timeout: 15000 }, async (t) => {
   const f = await fixture(t);
   const stdio = await f.client();
   const http = await f.client("http");
-  assert.equal((await (await fetch(f.base + "/health")).json()).version, "3.9.0");
+  assert.equal((await (await fetch(f.base + "/health")).json()).version, "3.11.1");
   for (const client of [stdio, http]) {
-    assert.deepEqual((await client.listTools()).tools.map((tool) => tool.name).sort(), ["figma_export", "figma_guidance", "figma_status", "figma_validate_layout"]);
+    assert.deepEqual((await client.listTools()).tools.map((tool) => tool.name).sort(), ["figma_assess_preview", "figma_export", "figma_guidance", "figma_status", "figma_validate_layout"]);
     assert.equal(payload(await client.callTool({ name: "figma_status", arguments: {} })).connected, false);
     const guidance = payload(await client.callTool({ name: "figma_guidance", arguments: { tags: ["tab", "unknown-tag"] } }));
     assert.equal(guidance.guidance.tab.title, "Tab interaction");
@@ -104,11 +104,20 @@ test("MCP export round trip executes the real plugin filtering logic", { timeout
   assert.deepEqual(summary.counts, { roots: 1, nodes: 2, texts: 0, images: 0, repeatGroups: 0, reviewRequired: 0 });
   assert.equal("nodes" in summary, false);
   assert.equal("assets" in summary, false);
+  assert.equal(summary.generationGate.status, "PREVIEW_ASSESSMENT_REQUIRED");
+  assert.equal(summary.generationGate.blocking, true);
+  assert.equal(summary.generationGate.requiredTool, "figma_assess_preview");
   assert.match(summary.files.previewHtmlPath, /preview\/index\.html$/);
   const full = JSON.parse(await readFile(summary.files.designPath, "utf8"));
   assert.deepEqual(full.nodes[0].children.map((n) => n.id), ["visible"]);
   await access(summary.files.previewHtmlPath);
   await access(summary.files.generationManifestPath);
+  const unknown = await client.callTool({ name: "figma_assess_preview", arguments: { designPath: summary.files.designPath, assessment: { summary: "The generated preview was opened and inspected as the implementation base.", preserve: [{ description: "Preserve the exported root structure", nodeIds: ["root"] }], gaps: [{ description: "Adjust one visible child after review", nodeIds: ["missing"], action: "Fix the targeted child layout" }] } } });
+  assert.equal(unknown.isError, true);
+  assert.match(unknown.content[0].text, /unknown node IDs/);
+  const assessed = payload(await client.callTool({ name: "figma_assess_preview", arguments: { designPath: summary.files.designPath, assessment: { summary: "The generated preview is a usable structural base with one targeted child refinement.", preserve: [{ description: "Preserve the exported root hierarchy", nodeIds: ["root"] }], gaps: [{ description: "Refine the visible child spacing", nodeIds: ["visible"], action: "Adjust spacing without replacing the preview structure" }] } } }));
+  assert.equal(assessed.status, "accepted");
+  await access(assessed.previewAssessmentPath);
 });
 
 test("existing MCP names support Pen status, selection export, Auto Layout geometry and local image assets", { timeout: 15000 }, async (t) => {
@@ -323,6 +332,8 @@ test("MCP returns real local image paths only after bytes are written, and valid
   assert.notEqual(exported.isError, true, exported.content[0].text);
   const saved = payload(exported);
   assert.equal(saved.meta.exportDirectory.startsWith(outputDir + "/"), true);
+  assert.equal(saved.meta.generationGate.status, "PREVIEW_ASSESSMENT_REQUIRED");
+  assert.equal(saved.meta.validation.previewAssessmentRequired, true);
   assert.equal(Object.keys(saved.assets).length, 3);
   assert.equal(saved.nodes[0].gradient.angleDeg, 90);
   const layout = JSON.parse(await readFile(saved.meta.layoutPath, "utf8"));
@@ -343,36 +354,41 @@ test("MCP returns real local image paths only after bytes are written, and valid
   assert.equal(styles.outputContract.cssFileRequired, true);
   assert.equal(styles.outputContract.staticInlineStyles, "forbidden");
   for (const asset of Object.values(saved.assets)) { await access(asset.path); assert.equal((await readFile(asset.path)).length, asset.byteLength); }
+  const assessment = payload(await client.callTool({ name: "figma_assess_preview", arguments: { designPath: saved.meta.designPath, assessment: { summary: "The rendered preview preserves the complete layer hierarchy and needs a targeted icon alignment correction.", preserve: [{ description: "Keep the root hierarchy and clipping", nodeIds: ["root", "photo", "text"] }], gaps: [{ description: "Correct the icon alignment in its existing slot", nodeIds: ["icon"], action: "Adjust the icon container without rebuilding the page" }] } } }));
+  const baselineGate = { previewAssessmentPath: assessment.previewAssessmentPath };
   const measured = { sampleId: "mcp-baseline", collectedAt: new Date().toISOString(), viewport: { width: 1200, height: 900, devicePixelRatio: 1 }, collectorVersion: 5, coordinateSpace: "root-relative", stable: true, fontsReady: true, brokenImages: [], nodes: [saved.nodes[0], ...saved.nodes[0].children].map((n) => ({ id: n.id, rootId: n.rootId, parentId: n.parentId, visible: true, bounds: n.relativeBounds, tagName: n.assetId ? "IMG" : "DIV", imageSources: n.assetId ? [saved.assets[n.assetId].path] : [], textStyle: n.type === "TEXT" ? { fontSize: n.fontSize, lineHeight: n.lineHeight.pixels, fontWeight: n.fontWeight, fontStyle: "normal", letterSpacing: 0, textAlign: "left", direction: "ltr", textDecorationLine: "none", color: n.textColor.css, textFillColor: n.textColor.css } : undefined, assetImages: n.assetId ? [{ assetId: n.assetId, src: saved.assets[n.assetId].path, bounds: n.relativeImageBounds, naturalWidth: saved.assets[n.assetId].pixelWidth, naturalHeight: saved.assets[n.assetId].pixelHeight, opacity: 1, objectFit: "fill" }] : [], renderStyle: renderStyle(n.id === "root" ? { ...n.gradient, backgroundImage: n.gradient.css, opacity: 0.6, overflowX: "hidden", overflowY: "hidden", cornerRadii: Array(4).fill("12px") } : {}) })) };
   // Synthetic measurements exercise the MCP comparison API, not browser rendering.
   measured.nodes[1].bounds = { ...measured.nodes[1].bounds, x: 10 };
-  const failed = payload(await client.callTool({ name: "figma_validate_layout", arguments: { designPath: saved.meta.designPath, actual: measured } }));
+  const blocked = await client.callTool({ name: "figma_validate_layout", arguments: { designPath: saved.meta.designPath, actual: measured } });
+  assert.equal(blocked.isError, true);
+  assert.match(blocked.content[0].text, /Preview-first gate/);
+  const failed = payload(await client.callTool({ name: "figma_validate_layout", arguments: { designPath: saved.meta.designPath, actual: measured, ...baselineGate } }));
   assert.equal(failed.passed, false);
   assert.equal(failed.failed[0].id, "icon");
   measured.nodes[1].bounds.x = 0;
   const actualPath = join(saved.meta.exportDirectory, "synthetic-actual.json");
   await writeFile(actualPath, JSON.stringify(measured));
-  const passed = payload(await client.callTool({ name: "figma_validate_layout", arguments: { designPath: saved.meta.designPath, actualPath } }));
+  const passed = payload(await client.callTool({ name: "figma_validate_layout", arguments: { designPath: saved.meta.designPath, actualPath, ...baselineGate } }));
   assert.equal(passed.passed, true);
   assert.equal(passed.visualAcceptance, "not-verified");
   assert.equal(passed.workflowComplete, false);
   assert.equal(passed.phase, "baseline");
   await access(passed.reportPath);
   // Exercise inline schema retention as well as the actualPath route above.
-  const inlinePassed = payload(await client.callTool({ name: "figma_validate_layout", arguments: { designPath: saved.meta.designPath, actual: measured } }));
+  const inlinePassed = payload(await client.callTool({ name: "figma_validate_layout", arguments: { designPath: saved.meta.designPath, actual: measured, ...baselineGate } }));
   assert.equal(inlinePassed.passed, true);
   measured.nodes[0].renderStyle.overflowY = "visible";
-  const propertyFailed = payload(await client.callTool({ name: "figma_validate_layout", arguments: { designPath: saved.meta.designPath, actual: measured } }));
+  const propertyFailed = payload(await client.callTool({ name: "figma_validate_layout", arguments: { designPath: saved.meta.designPath, actual: measured, ...baselineGate } }));
   assert.equal(propertyFailed.passed, false);
   assert.equal(propertyFailed.failed[0].propertyMismatches[0].property, "clipsContent");
   measured.nodes[0].renderStyle.overflowY = "hidden";
   measured.nodes[3].textStyle.color = "rgb(255, 0, 0)";
-  const wrongColor = payload(await client.callTool({ name: "figma_validate_layout", arguments: { designPath: saved.meta.designPath, actual: measured } }));
+  const wrongColor = payload(await client.callTool({ name: "figma_validate_layout", arguments: { designPath: saved.meta.designPath, actual: measured, ...baselineGate } }));
   assert.equal(wrongColor.passed, false);
   assert.equal(wrongColor.failed[0].propertyMismatches[0].property, "textColor.color");
   measured.nodes[3].textStyle.color = saved.nodes[0].children[2].textColor.css;
   measured.nodes[0].renderStyle.backgroundImage = saved.nodes[0].gradient.css.replace("90deg", "180deg");
-  const wrongGradient = payload(await client.callTool({ name: "figma_validate_layout", arguments: { designPath: saved.meta.designPath, actual: measured } }));
+  const wrongGradient = payload(await client.callTool({ name: "figma_validate_layout", arguments: { designPath: saved.meta.designPath, actual: measured, ...baselineGate } }));
   assert.equal(wrongGradient.passed, false);
   assert.equal(wrongGradient.failed[0].propertyMismatches[0].property, "gradient-direction");
   measured.nodes[0].renderStyle.backgroundImage = saved.nodes[0].gradient.css;

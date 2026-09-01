@@ -14,7 +14,7 @@ const layer = (id, name, x, y, children = [], properties = {}) => ({ id, name, t
 const card = (id, number, x, y) => layer(id, `Skill Row ${number}`, x, y, [
   { id: `${id}-name`, name: "Skill Name", type: "TEXT", characters: `Skill ${number}`, absoluteBounds: bounds(x, y) },
 ]);
-const design = (children) => ({ meta: { schemaVersion: 3, exporterVersion: "3.4.1" }, assets: {}, nodes: [layer("root", "Page", 0, 0, children)] });
+const design = (children) => ({ meta: { schemaVersion: 3, exporterVersion: "3.5.0" }, assets: {}, nodes: [layer("root", "Page", 0, 0, children)] });
 
 test("semantic plan emits top-to-bottom then left-to-right code order independent of design order", () => {
   const plan = semanticPlan(design([

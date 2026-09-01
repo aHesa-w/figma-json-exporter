@@ -167,7 +167,7 @@ export function validateLayout(designInput: unknown, actual: ActualLayout, toler
     scope: "automated geometry, image references/placement/pixel dimensions, clipping, opacity, ordinary corner radii, text metrics/colors and linear gradient direction/stops/paint box only; not full visual or interaction acceptance",
     collectorCompatible, requiredCollectorVersion: COLLECTOR_VERSION,
     visualAcceptance: "not-verified", reviewRequired,
-    sourceCoverage: design.meta.sourceMode === "pen" ? `Pen ${design.meta.sourceVersion ?? "2.x"} normalized export` : design.meta.exporterVersion === "3.4.1" ? "Figma v3.4" : "legacy Figma export: newly added properties may be absent; re-export for full property coverage",
+    sourceCoverage: design.meta.sourceMode === "pen" ? `Pen ${design.meta.sourceVersion ?? "2.x"} normalized export` : design.meta.exporterVersion === "3.5.0" ? "Figma v3.5" : "legacy Figma export: newly added properties may be absent; re-export for full property coverage",
     tolerance, total: layers.length, matched: layers.length - failed.length,
     missing, duplicates, unexpected, environmentReady,
     stable: actual.stable, fontsReady: actual.fontsReady, brokenImages: actual.brokenImages ?? [],

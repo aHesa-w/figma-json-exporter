@@ -198,6 +198,62 @@ function serializeLineHeight(lineHeight, fontSize) {
 // Explicit portable/system-font policy, not a vendor-name blacklist. A local
 // browser font inventory is not available in the Figma sandbox.
 var SYSTEM_FONT_FAMILIES = ["arial", "arial black", "helvetica", "helvetica neue", "times new roman", "times", "georgia", "verdana", "tahoma", "trebuchet ms", "courier new", "courier", "segoe ui", "sf pro", "sf pro display", "sf pro text", "pingfang sc", "pingfang tc", "pingfang hk", "microsoft yahei", "microsoft jhenghei", "simsun", "simhei", "songti sc", "heiti sc", "hiragino sans", "hiragino sans gb", "baidu number", "baidu number plus", "sans-serif", "serif", "monospace", "system-ui", "-apple-system", "blinkmacsystemfont"];
+function fontsAreWhitelisted(fonts) {
+  for (var i = 0; i < fonts.length; i++) {
+    var family = String(fonts[i].family || "").trim().toLowerCase();
+    if (SYSTEM_FONT_FAMILIES.indexOf(family) === -1) return false;
+  }
+  return fonts.length > 0;
+}
+
+var SEGMENT_TEXT_FIELDS = ["fontName", "fontSize", "fontWeight", "lineHeight", "letterSpacing", "textDecoration", "textCase", "fills"];
+function serializeStyledTextSegments(node, base) {
+  if (base.type !== "TEXT" || typeof node.getStyledTextSegments !== "function") return null;
+  var hasSupportedMixed = false;
+  for (var i = 0; i < SEGMENT_TEXT_FIELDS.length; i++) {
+    var prop = SEGMENT_TEXT_FIELDS[i];
+    if (base[prop] === "mixed" || isMixed(readProp(node, prop, null))) hasSupportedMixed = true;
+  }
+  if (!hasSupportedMixed) return null;
+  // Paragraph-level and stroke differences cannot be represented safely by
+  // inline spans in the starter preview; keep the existing raster fallback.
+  var unsupported = ["paragraphSpacing", "paragraphIndent", "strokes"];
+  for (var u = 0; u < unsupported.length; u++) {
+    if (base[unsupported[u]] === "mixed" || isMixed(readProp(node, unsupported[u], null))) return null;
+  }
+  var raw;
+  try { raw = node.getStyledTextSegments(SEGMENT_TEXT_FIELDS); } catch (e) { return null; }
+  if (!raw || !raw.length || raw.length > 1000) return null;
+  var result = [], cursor = 0, combined = "";
+  for (var s = 0; s < raw.length; s++) {
+    var segment = raw[s];
+    if (!segment || segment.start !== cursor || segment.end <= segment.start || typeof segment.characters !== "string") return null;
+    var fontName = serializeFontName(segment.fontName);
+    var fontSize = serializeMixedValue(segment.fontSize);
+    var fontWeight = serializeMixedValue(segment.fontWeight);
+    var lineHeight = serializeLineHeight(segment.lineHeight, fontSize);
+    var letterSpacing = serializeLetterSpacing(segment.letterSpacing, fontSize);
+    var textDecoration = serializeMixedValue(segment.textDecoration);
+    var textCase = serializeMixedValue(segment.textCase);
+    if (fontName === "mixed" || !fontsAreWhitelisted([fontName]) || typeof fontSize !== "number" || typeof fontWeight !== "number" || lineHeight === "mixed" || lineHeight.unit === "AUTO" || letterSpacing === "mixed" || textDecoration === "mixed" || textCase === "mixed" || !segment.fills || isMixed(segment.fills)) return null;
+    var fills = [];
+    for (var f = 0; f < segment.fills.length; f++) fills.push(serializePaint(segment.fills[f]));
+    var textColor = serializeTextColor(fills);
+    if (!textColor) return null;
+    result.push({
+      start: segment.start, end: segment.end, characters: segment.characters,
+      fontName: fontName, fontSize: fontSize, fontWeight: fontWeight,
+      lineHeight: lineHeight, letterSpacing: letterSpacing,
+      textDecoration: textDecoration, textCase: textCase,
+      fills: fills, textColor: textColor
+    });
+    cursor = segment.end;
+    combined += segment.characters;
+  }
+  if (cursor !== base.characters.length || combined !== base.characters) return null;
+  return result;
+}
+
 function textRasterReason(node, base) {
   if (base.type !== "TEXT") return null;
   var fonts = [];
@@ -206,11 +262,7 @@ function textRasterReason(node, base) {
     try { fonts = node.getRangeAllFontNames(0, base.characters.length); } catch (e) { return "unknown-font"; }
   }
   if (!fonts.length) return "unknown-font";
-  var whitelisted = true;
-  for (var i = 0; i < fonts.length; i++) {
-    var family = String(fonts[i].family || "").trim().toLowerCase();
-    if (SYSTEM_FONT_FAMILIES.indexOf(family) === -1) { whitelisted = false; break; }
-  }
+  var whitelisted = fontsAreWhitelisted(fonts);
   // Whitelisted families stay selectable DOM text even when this machine lacks
   // the font: the exported font-family lets viewers who have it get faithful
   // rendering, and missing-font substitutes were never faithful either.
@@ -220,12 +272,12 @@ function textRasterReason(node, base) {
   }
   if (readProp(readProp(figma, "root", {}), "documentColorProfile", "LEGACY") === "DISPLAY_P3") return "wide-gamut-text";
   var textProps = ["fontName", "fontSize", "fontWeight", "lineHeight", "letterSpacing", "textDecoration", "textCase", "paragraphSpacing", "paragraphIndent", "fills", "strokes"];
-  for (var p = 0; p < textProps.length; p++) {
-    if (base[textProps[p]] === "mixed" || isMixed(readProp(node, textProps[p], null))) return "mixed-text-style";
-  }
+  var hasMixedStyle = false;
+  for (var p = 0; p < textProps.length; p++) if (base[textProps[p]] === "mixed" || isMixed(readProp(node, textProps[p], null))) hasMixedStyle = true;
+  if (hasMixedStyle && !base.styledTextSegments) return "mixed-text-style";
   if (base.lineHeight.unit === "AUTO" && base.lineHeight.source !== "figma-css") return "unresolved-auto-line-height";
   if (base.strokes && base.strokes.some(function(p) { return p.visible !== false && p.opacity !== 0; })) return "text-stroke";
-  if (!base.textColor) return "complex-text-paint";
+  if (!base.textColor && !base.styledTextSegments) return "complex-text-paint";
   return null;
 }
 
@@ -501,6 +553,8 @@ async function serializeNodeAsync(node, context) {
   var base = serializeNodeBase(node);
 
   if (context) await resolveAutoLineHeight(node, base);
+  var styledTextSegments = serializeStyledTextSegments(node, base);
+  if (styledTextSegments) base.styledTextSegments = styledTextSegments;
   var rasterReason = textRasterReason(node, base) || gradientRasterReason(base);
   var visibleChildren = readProp(node, "children", []).filter(shouldExportNode);
   var imageLeaf = collectImageHashesFromNode(node).length > 0 && visibleChildren.length === 0;
@@ -621,7 +675,7 @@ figma.ui.onmessage = async function(msg) {
       if (n) { nodes.push(n); names.push(n.name); }
     }
     if (!nodes.length) throw new Error("选中的节点均已隐藏或透明度为 0，没有可导出的可见节点");
-    var data = { meta: { schemaVersion: 3, exporterVersion: "3.4.1", exportedAt: new Date().toISOString(), nodeName: names.join("+"), nodeCount: nodes.length }, nodes: nodes, images: {}, assets: {} };
+    var data = { meta: { schemaVersion: 3, exporterVersion: "3.5.0", exportedAt: new Date().toISOString(), nodeName: names.join("+"), nodeCount: nodes.length }, nodes: nodes, images: {}, assets: {} };
     data.meta.documentColorProfile = readProp(readProp(figma, "root", {}), "documentColorProfile", "LEGACY");
     var hashes = {};
     for (var i = 0; i < nodes.length; i++) {

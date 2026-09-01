@@ -14,7 +14,7 @@ async function loadTS(file) {
 }
 const { flowPlan, validateFlow } = await loadTS("../src/flow.ts");
 const { validateFiles } = await loadTS("../src/assets.ts");
-const design = () => ({ meta: { schemaVersion: 3, exporterVersion: "3.4.1" }, assets: {}, nodes: [{ id: "root", type: "FRAME", name: "root", absoluteBounds: { x: 0, y: 0, width: 100, height: 100 }, children: [{ id: "child", name: "child", type: "TEXT", absoluteBounds: { x: 10, y: 10, width: 20, height: 20 } }] }] });
+const design = () => ({ meta: { schemaVersion: 3, exporterVersion: "3.5.0" }, assets: {}, nodes: [{ id: "root", type: "FRAME", name: "root", absoluteBounds: { x: 0, y: 0, width: 100, height: 100 }, children: [{ id: "child", name: "child", type: "TEXT", absoluteBounds: { x: 10, y: 10, width: 20, height: 20 } }] }] });
 const actual = () => ({ collectorVersion: 5, sampleId: randomUUID(), collectedAt: new Date().toISOString(), viewport: { width: 1200, height: 900, devicePixelRatio: 1 }, coordinateSpace: "root-relative", stable: true, fontsReady: true, brokenImages: [], nodes: [
   { id: "root", rootId: "root", parentId: null, visible: true, bounds: { x: 0, y: 0, width: 100, height: 100 }, renderStyle: renderStyle(), flowStyle: flowStyle({ display: "flex" }) },
   { id: "child", rootId: "root", parentId: "root", visible: true, bounds: { x: 10, y: 10, width: 20, height: 20 }, renderStyle: renderStyle(), flowStyle: flowStyle() },
@@ -122,7 +122,7 @@ test("failed, changed-design and non-baseline reports cannot unlock the flow sta
 });
 
 test("flow hard constraint rejects grid/flex that layoutStrategy does not justify", () => {
-  const make = (texts, autoLayout) => ({ meta: { schemaVersion: 3, exporterVersion: "3.4.1" }, assets: {}, nodes: [{ id: "root", type: "FRAME", name: "root", autoLayout, absoluteBounds: { x: 0, y: 0, width: 100, height: 100 }, children: texts.map((b, i) => ({ id: `t${i}`, name: `t${i}`, type: "TEXT", absoluteBounds: b })) }] });
+  const make = (texts, autoLayout) => ({ meta: { schemaVersion: 3, exporterVersion: "3.5.0" }, assets: {}, nodes: [{ id: "root", type: "FRAME", name: "root", autoLayout, absoluteBounds: { x: 0, y: 0, width: 100, height: 100 }, children: texts.map((b, i) => ({ id: `t${i}`, name: `t${i}`, type: "TEXT", absoluteBounds: b })) }] });
   const sample = (display) => ({ collectorVersion: 5, sampleId: randomUUID(), collectedAt: new Date().toISOString(), viewport: { width: 1200, height: 900, devicePixelRatio: 1 }, coordinateSpace: "root-relative", stable: true, fontsReady: true, brokenImages: [], nodes: [
     { id: "root", rootId: "root", parentId: null, visible: true, bounds: { x: 0, y: 0, width: 100, height: 100 }, renderStyle: renderStyle(), flowStyle: flowStyle({ display }) },
     ...[0, 1, 2].map(i => ({ id: `t${i}`, rootId: "root", parentId: "root", visible: true, bounds: { x: 0, y: i * 20, width: 10, height: 10 }, renderStyle: renderStyle(), flowStyle: flowStyle() })),

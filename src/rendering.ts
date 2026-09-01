@@ -89,6 +89,7 @@ export function renderingRequirements(node: Layer) {
     if (typeof node.textAlignHorizontal === "string") checks.push("textAlignHorizontal");
     if (["NONE", "UNDERLINE", "STRIKETHROUGH"].includes(String(node.textDecoration))) checks.push("textDecoration");
     if ((node.fontName as { style?: string })?.style) checks.push("fontStyle");
+    if (Array.isArray(node.styledTextSegments)) add("styledTextSegments", "Verify every exported inline text range keeps its characters, color and typography; the current collector checks the parent text box and common metrics, not each span independently.");
     add("text-content/font/vertical-alignment/wrapping", "Check glyphs, exact text, baselines, vertical alignment, whitespace, paragraph/list spacing, truncation and case. CSS metrics alone do not prove these.");
   }
   for (const property of ["fills", "strokes", "effects"]) {

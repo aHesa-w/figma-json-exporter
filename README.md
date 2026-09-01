@@ -40,6 +40,7 @@ node /absolute/path/to/figma-json-exporter/dist/mcp-server.js
 
 - `figma_status`：默认检查 Figma 插件；传 `mode: "pen"` 时检查本地 `.pen` 文件并列出顶层节点。
 - `figma_export`：默认导出 Figma 当前选区；传 `mode: "pen"` 时导出 `.pen` 文件中的指定节点。两种模式都先将完整设计、图片、计划和模型无关基础预览写入本地；MCP 默认只返回根节点、计数和文件路径的紧凑摘要，只有显式传 `responseMode: "full"` 才返回完整设计 JSON。
+- `figma_assess_preview`：生成实现前的强制门禁。模型必须先打开 `previewHtmlPath`，读取 `previewCssPath` 和 `generationManifestPath`，再提交需要保留的预览决策、缺口、改动及对应图层 ID；返回 baseline 必需的 `previewAssessmentPath`。
 - `figma_guidance`：按标签渐进式加载实现/推断标准。传入 `semantic-plan.json` 中容器、重复组、交互候选携带的 `guidanceTags`，或阶段标签（`workflow`/`baseline`/`flow`/`style`）、图层属性标签（`image`/`gradient`/`text`/`clipping`/`mask`/`paint`）或 `subagent`；不传标签时列出全部可用标签。
 - `figma_validate_layout`：将浏览器实测矩形与设计 JSON 比较，返回逐层偏差及完整报告路径；可用 `mode` 断言设计来源。
 
@@ -114,6 +115,7 @@ Agent 调用示例（路径替换为实际文件）：
 ```json
 {
   "designPath": "/.../design.json",
+  "previewAssessmentPath": "/.../preview-assessment.json",
   "actualPath": "/.../baseline-actual.json",
   "phase": "baseline"
 }
@@ -138,7 +140,7 @@ Agent 调用示例（路径替换为实际文件）：
 
 新增报告字段：`phase`、`workflowComplete`、`baselineReportPath`、`flowMismatches`、`flowExceptions`。首轮通过后的 `nextAction` 会明确要求重构并进行第二轮。`semantic-plan.json` 提供源码编排建议，并不伪装成源码或交互自动验收；自动验收仍不证明像素、响应式行为、完整交互或代码质量。MCP 负责约束和比较，HTML/CSS 修改与浏览器执行由 Agent 完成，不会自行重写用户页面。
 
-本次服务版本为 **3.9.0**：`figma_export` 默认返回紧凑摘要，导出包新增 `generation-manifest.json` 和不依赖模型的 `preview/index.html`、`preview/preview.css`。预览按层级、阅读顺序、重叠关系和通用重复结构生成；不专门推断 Tab，复杂结构保留层级并使用确定性 fallback。预览只是后续实现的基础，不要求直接通过 flow，也不替代 baseline、flow、视觉或交互验收。Figma 插件仍兼容 **3.4.1**，采集器版本仍为 **collectorVersion: 5**。升级后需重启共享服务，并重新连接客户端 MCP；已有 stdio 进程中的工具参数和代码不会随磁盘构建自动更新。
+本次服务版本为 **3.11.1**，Figma 插件仍为 **3.5.0**。可选择 DOM 文字默认禁止浏览器软换行，仅保留源文本中的显式换行；3.11.0 的 `PREVIEW_ASSESSMENT_REQUIRED` 门禁和 3.10.0 的混合文字分段能力保持不变。采集器仍为 **collectorVersion: 5**。升级后需重启共享服务并重新连接客户端 MCP，Figma 插件代码未变时无需再次导入。
 
 ## 图片先落盘，JSON 后返回
 
@@ -164,7 +166,7 @@ export-<uuid>/
 节点树还保留填充、描边、效果、圆角、文本、字体、Auto Layout、约束和组件引用。基础预览保留每个 `data-d2c-id`，将明显覆盖父容器且位于内容下方的视觉层标为背景；非重叠序列使用 block/inline/flex，重叠和二维关系使用 grid-overlay 默认方案。通用相似结构写入 repeat 元数据并保留展开 HTML；不生成 Tab 专用行为。`renderAs: "image"` 的原子矢量由 PNG 表达真实轮廓，预览不会再把其 fill、stroke、旋转或透明度重复应用到矩形包围盒，避免图标周围出现黑白色块和伪边框。图片字节从 Figma 插件传至本机服务，所有文件写完后才原子发布目录并返回结果。缺图、读取失败、未知图片格式或写入失败都会使导出失败，不能返回假路径。支持 PNG/JPEG/GIF/WebP 原图；单张图片字节上限 32MB，单次累计 128MB，导出超时 120 秒。
 
 - `meta.schemaVersion = 3`；`meta.designPath`、`meta.layoutPath`、`meta.semanticPlanPath` 等为本机绝对路径。
-- `meta.exporterVersion = "3.4.1"` 标识新版插件已加载；升级后应关闭并重新打开 Figma 插件。服务会拒绝旧插件的导出，避免静默漏掉新增属性与字体/图片处理；旧版 v3 JSON 仍可用于校验诊断。
+- `meta.exporterVersion = "3.5.0"` 标识支持分段文字的新版插件已加载；升级后应关闭并重新打开 Figma 插件。服务会拒绝旧插件的新导出，避免混合文字继续静默栅格化；旧版 v3 JSON 仍可用于校验诊断。
 - `assets[assetId]` 含 `path`、`relativePath`、`mimeType`、`byteLength`、`sha256`。
 - 普通图片填充的 `imageHash` 对应 `assets[imageHash]`；形状图片节点通过 `assetId` 引用资源。
 - 手动导出可选择 ZIP，包含 `index.json` 和 `images/`，ZIP 中使用相对路径。UI 打包 ZIP 仍引用 cdnjs 上的 JSZip；MCP 不依赖该 CDN。
@@ -200,6 +202,10 @@ PNG 使用 Figma 的 `exportAsync`、`useAbsoluteBounds: true`。v3.3 将布局�
 有子节点的图片容器仍保留布局层级，其 `fills/strokes` 中的 `imageHash` 必须映射到 `assets[imageHash]` 并绘制，不能生成空容器。导出保留 `imageTransform`、`scaleMode`、`scalingFactor`、`rotation`、`filters` 和渐变矩阵；不能将 CROP 当作任意居中 cover。[Figma Paint 定义](https://developers.figma.com/docs/plugins/api/Paint/)
 
 所有 `renderAs: "image"` 节点都应优先于 `type === "TEXT"` 等分支处理，并使用对应本地文件。不能在图片上再绘制原文、填充、效果或重复应用节点透明度。
+
+## v3.5.0：混合文字分段
+
+当 TEXT 节点只有颜色、字重、字号、字体、行高、字距、大小写或装饰等可表达的局部差异时，插件使用 Figma `getStyledTextSegments` 导出连续字符范围；预览为各范围生成无内联样式的 `<span>` 和 CSS。DOM 文字默认 `white-space: pre`：保留源文本中的显式换行，但不允许浏览器因容器宽度自行软换行，分段 `<span>` 继承同一规则。每段必须使用可移植系统字体、单一实色文字填充及可解析的排版值。渐变/图片文字填充、文字描边、混合段落属性、未知字体、AUTO 分段行高或字符范围不完整时继续输出 PNG，不能为了 DOM 文本丢失视觉语义。
 
 ## v3.4.1：空视觉边界恢复
 
@@ -282,10 +288,10 @@ Figma 的 `absoluteRenderBounds` 允许为 `null`，不能仅凭此认定图层�
 
 Agent 应按以下顺序执行：
 
-1. Figma 模式在 Figma 选择完整画板并打开插件；Pen 模式从编辑器取得 `.pen` 路径和选中节点 ID。调用同名 `figma_export`，先打开返回摘要里的 `previewHtmlPath` 并读取 `generationManifestPath`；只针对预览或校验指出的问题，再按节点读取 `design.json`、`implementation.json` 和其他计划。不能用字符或猜测图标替代已导出的图片。
-2. 实现时为**每个导出图层**标记 `data-d2c-id="源图层 ID"`，选区根节点额外标记 `data-d2c-root`。保留导出层级；非设计结构的包装元素可不加 ID。原子图片的布局容器带图层 ID，内部 IMG 标记 `data-d2c-asset="assetId"` 并使用 `imagePlacement`，不再给 IMG 添加另一份图层 ID。
+1. Figma 模式在 Figma 选择完整画板并打开插件；Pen 模式从编辑器取得 `.pen` 路径和选中节点 ID。调用 `figma_export` 后先停止编码，打开 `previewHtmlPath`，读取 `previewCssPath` 和 `generationManifestPath`，把它当作第一版实现候选进行评估。调用 `figma_assess_preview`，明确预览中应保留的结构/样式、需要修改的缺口、具体动作和对应图层 ID，取得 `previewAssessmentPath`。不能从空白页重做，也不能绕过 preview 直接用 `design.json` 全量生成。
+2. 在 preview 的 HTML/CSS 结构基础上复制或继续实现，只针对评估及后续校验暴露的问题按节点读取 `design.json`、`implementation.json` 和其他计划。为**每个导出图层**保留 `data-d2c-id="源图层 ID"`，选区根节点额外保留 `data-d2c-root`。不能用字符或猜测图标替代已导出的图片。
 3. 用实际浏览器加载页面，等待字体、图片和稳定布局。执行 `collector-expression.js` 的内容，或加载 `collect-layout.js` 后调用 `await window.collectFigmaLayout()`，保存返回值为 `actual-layout.json`。
-4. 调用 `figma_validate_layout({ designPath: "/.../design.json", actualPath: "/.../actual-layout.json", phase: "baseline", tolerance: 1 })`。也可直接传 `actual` 对象，两种方式二选一。
+4. 调用 `figma_validate_layout({ designPath: "/.../design.json", previewAssessmentPath: "/.../preview-assessment.json", actualPath: "/.../actual-layout.json", phase: "baseline", tolerance: 1 })`。baseline 缺少当前设计的评估凭据会直接失败；也可直接传 `actual` 对象，两种方式二选一。
 5. 按报告先修父级，再修子级，修改实际页面代码、重新渲染和采集，然后再次校验。默认六项边界/尺寸误差均不超过 **1 CSS px**；缺失/重复/多余 ID、层级错误、隐藏实现、图片失败、未稳定布局均不能通过。
 6. 基线通过后按 `flow-plan.json` 重构为文档流，并按 `semantic-plan.json` 调整源码顺序、重复结构和安全本地交互；重新采集，用 `phase: "flow"` 和成功的 `baselineReportPath` 再验收，继续修正直到 `workflowComplete: true`。随后完成独立视觉和交互复核。
 

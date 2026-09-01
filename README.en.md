@@ -40,6 +40,7 @@ Both `mcp-config.json` and `mcp-config.stdio.json` use the compiled entry; repla
 
 - `figma_status`: checks the Figma plugin by default; with `mode: "pen"` it checks a local `.pen` file and lists its top-level nodes.
 - `figma_export`: exports the current Figma selection by default; with `mode: "pen"` it exports selected nodes from a `.pen` file. Both modes persist the full design, assets, plans and a model-free starter preview first. MCP returns a compact roots/counts/files summary by default; pass `responseMode: "full"` only when the complete design JSON is explicitly needed in context.
+- `figma_assess_preview`: mandatory pre-implementation gate. The model must open `previewHtmlPath`, read `previewCssPath` and `generationManifestPath`, then submit preview decisions to preserve plus targeted gaps/actions and affected layer IDs. It returns the `previewAssessmentPath` required by baseline validation.
 - `figma_guidance`: progressively loads implementation/inference standards by tag. Pass the `guidanceTags` carried by semantic-plan containers/repeat groups/interaction candidates, or stage tags (`workflow`/`baseline`/`flow`/`style`), layer-property tags (`image`/`gradient`/`text`/`clipping`/`mask`/`paint`) or `subagent`; omit tags to list every available tag.
 - `figma_validate_layout`: compares browser-measured rectangles against the design JSON and returns per-layer deltas plus a full report path; `mode` can assert the design source.
 
@@ -114,6 +115,7 @@ Agent call example (replace paths with the real files):
 ```json
 {
   "designPath": "/.../design.json",
+  "previewAssessmentPath": "/.../preview-assessment.json",
   "actualPath": "/.../baseline-actual.json",
   "phase": "baseline"
 }
@@ -138,7 +140,7 @@ The absolute IMG offset used inside an image to preserve outside strokes/shadows
 
 New report fields: `phase`, `workflowComplete`, `baselineReportPath`, `flowMismatches`, `flowExceptions`. After the first stage passes, `nextAction` explicitly requires refactoring and a second stage. `semantic-plan.json` provides source-arrangement suggestions and does not masquerade as source or interaction acceptance; automated acceptance still does not prove pixels, responsive behavior, complete interactions or code quality. MCP enforces constraints and comparisons; HTML/CSS edits and browser execution are done by the agent, which never rewrites the user's page itself.
 
-This service version is **3.9.0**: `figma_export` returns a compact summary by default, and every export adds `generation-manifest.json` plus model-free `preview/index.html` and `preview/preview.css`. The starter preview uses hierarchy, reading order, overlap and generic repeat inference; it performs no tab-specific inference, and complex structures keep their hierarchy with deterministic fallbacks. The preview is a starting artifact rather than a flow, visual or interaction acceptance claim. The Figma plugin remains compatible with **3.4.1** and the collector remains **collectorVersion: 5**. Restart the shared service and reconnect MCP clients after upgrading.
+This service version is **3.11.1**; the Figma plugin remains **3.5.0**. Selectable DOM text now disables browser soft wrapping by default while preserving explicit source newlines. The 3.11.0 `PREVIEW_ASSESSMENT_REQUIRED` gate and 3.10.0 styled-text support remain unchanged, and the collector stays at **collectorVersion: 5**. Restart the shared service and reconnect MCP clients; the unchanged plugin code does not need re-importing.
 
 ## Images land on disk first, JSON returns after
 
@@ -164,7 +166,7 @@ export-<uuid>/
 The node tree also keeps fills, strokes, effects, radii, text, fonts, Auto Layout, constraints and component references. Image bytes travel from the Figma plugin to the local service; the directory is published and the result returned only after every file is written. A missing image, read failure, unknown image format or write failure fails the export — fake paths are never returned. Original PNG/JPEG/GIF/WebP images are supported; a single image payload is capped at 32MB, a single export at 128MB cumulative, and export times out after 120 seconds.
 
 - `meta.schemaVersion = 3`; `meta.designPath`, `meta.layoutPath`, `meta.semanticPlanPath` etc. are local absolute paths.
-- `meta.exporterVersion = "3.4.1"` marks the new plugin as loaded; after upgrading, close and reopen the Figma plugin. The service rejects exports from old plugins to avoid silently missing new properties and font/image handling; old v3 JSON can still be used for validation diagnostics.
+- `meta.exporterVersion = "3.5.0"` marks the styled-text-capable plugin as loaded; after upgrading, close and reopen the Figma plugin. The service rejects new exports from old plugins so mixed text cannot silently keep rasterizing; old v3 JSON can still be used for validation diagnostics.
 - `assets[assetId]` contains `path`, `relativePath`, `mimeType`, `byteLength`, `sha256`.
 - An ordinary image fill's `imageHash` maps to `assets[imageHash]`; shape-image nodes reference assets via `assetId`.
 - Manual export can choose ZIP, containing `index.json` and `images/` with relative paths inside the ZIP. The UI ZIP pack still references JSZip on cdnjs; MCP does not depend on that CDN.
@@ -200,6 +202,10 @@ This is a conservative policy and does not guarantee every listed font is instal
 An image container with children still keeps its layout hierarchy; the `imageHash` in its `fills/strokes` must map to `assets[imageHash]` and be painted, never an empty container. Export keeps `imageTransform`, `scaleMode`, `scalingFactor`, `rotation`, `filters` and gradient matrices; do not treat CROP as arbitrary centered cover. [Figma Paint definition](https://developers.figma.com/docs/plugins/api/Paint/)
 
 All `renderAs: "image"` nodes should be handled before branches like `type === "TEXT"` and use the corresponding local file. Do not re-paint original text, fills or effects on the image, or re-apply node opacity.
+
+## v3.5.0: mixed text ranges
+
+When a TEXT node only has expressible per-range differences in color, weight, size, family, line height, letter spacing, case or decoration, the plugin uses Figma `getStyledTextSegments` to export contiguous character ranges. The preview emits child `<span>` elements and external CSS without inline styles. DOM text defaults to `white-space: pre`: explicit source newlines are preserved, browser soft wrapping caused by container width is disabled, and child segments inherit the same rule. Every segment must use a portable system font, one solid text fill and resolvable typography. Gradient/image text fills, text strokes, mixed paragraph properties, unknown fonts, per-range AUTO leading or incomplete ranges keep the PNG fallback rather than losing visual semantics for selectable DOM text.
 
 ## v3.4.1: empty visual bounds recovery
 
@@ -282,10 +288,10 @@ Every exported layer has three rectangle sets, all with `x/y/width/height/left/t
 
 The agent should run in this order:
 
-1. Figma mode: select the full artboard in Figma and open the plugin; Pen mode: obtain the `.pen` path and selected node IDs from the editor. Call `figma_export`, open the returned `previewHtmlPath` and read `generationManifestPath` first; inspect `design.json`, `implementation.json` and other plans only for nodes/properties identified by the preview or validation. Do not replace exported images with characters or guessed icons.
-2. When implementing, mark **every exported layer** with `data-d2c-id="source-layer-id"` and additionally mark selection roots with `data-d2c-root`. Keep the exported hierarchy; wrapper elements that are not design structure may omit IDs. An atomic image's layout container carries the layer ID, its inner IMG is marked `data-d2c-asset="assetId"` and uses `imagePlacement` — do not give the IMG a second layer ID.
+1. Figma mode: select the full artboard and open the plugin; Pen mode: obtain the `.pen` path and selected node IDs. After `figma_export`, stop before coding: open `previewHtmlPath`, read `previewCssPath` and `generationManifestPath`, and assess them as the first implementation candidate. Call `figma_assess_preview` with preview strengths to preserve, targeted gaps/actions and affected layer IDs, retaining the returned `previewAssessmentPath`. Never restart from a blank page or bypass the preview with a full `design.json` generation pass.
+2. Copy or continue from the preview HTML/CSS structure and inspect detailed JSON/plans only for nodes identified by assessment or validation. Keep **every exported layer's** `data-d2c-id="source-layer-id"` and `data-d2c-root` on selection roots. Do not replace exported images with characters or guessed icons.
 3. Load the page in a real browser and wait for fonts, images and stable layout. Execute the contents of `collector-expression.js`, or load `collect-layout.js` and call `await window.collectFigmaLayout()`, saving the return value as `actual-layout.json`.
-4. Call `figma_validate_layout({ designPath: "/.../design.json", actualPath: "/.../actual-layout.json", phase: "baseline", tolerance: 1 })`. You may also pass the `actual` object directly — exactly one of the two.
+4. Call `figma_validate_layout({ designPath: "/.../design.json", previewAssessmentPath: "/.../preview-assessment.json", actualPath: "/.../actual-layout.json", phase: "baseline", tolerance: 1 })`. Baseline fails without an accepted assessment receipt for the current design. You may also pass the `actual` object directly — exactly one of the two.
 5. Per the report fix parents first, then children, modify the real page code, rerender, recollect, then validate again. By default all six boundary/size errors must be within **1 CSS px**; missing/duplicate/extra IDs, hierarchy errors, hidden implementations, image failures or unstable layout cannot pass.
 6. After baseline passes, refactor into document flow per `flow-plan.json` and adjust source order, repeat structures and safe local interactions per `semantic-plan.json`; recollect and validate with `phase: "flow"` and the successful `baselineReportPath`, iterating until `workflowComplete: true`. Then perform independent visual and interaction review.
 

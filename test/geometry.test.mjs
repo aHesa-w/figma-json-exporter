@@ -16,7 +16,7 @@ const { prepareDesign, validateLayout, collectLayout } = await loadTS("../src/ge
 const { parseCSSColor } = await loadTS("../src/rendering.ts");
 const { persistExport } = await loadTS("../src/assets.ts");
 const layer = (id, x, y, width = 100, height = 100) => ({ id, name: id, type: "FRAME", absoluteBounds: { x, y, width, height } });
-const design = () => ({ meta: { schemaVersion: 3, exporterVersion: "3.4.1" }, assets: {}, nodes: [{ ...layer("root", 400.25, -20.5), children: [layer("child", 410.75, -10.25, 20, 30)] }] });
+const design = () => ({ meta: { schemaVersion: 3, exporterVersion: "3.5.0" }, assets: {}, nodes: [{ ...layer("root", 400.25, -20.5), children: [layer("child", 410.75, -10.25, 20, 30)] }] });
 const actual = () => ({ collectorVersion: 5, coordinateSpace: "root-relative", stable: true, fontsReady: true, brokenImages: [], nodes: [
   { id: "root", rootId: "root", parentId: null, visible: true, renderStyle: renderStyle(), bounds: { x: 0, y: 0, width: 100, height: 100 } },
   { id: "child", rootId: "root", parentId: "root", visible: true, renderStyle: renderStyle({ borderBoxWidth: 20, borderBoxHeight: 30 }), bounds: { x: 10.5, y: 10.25, width: 20, height: 30 } },

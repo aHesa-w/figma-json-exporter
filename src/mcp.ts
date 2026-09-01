@@ -4,7 +4,7 @@ import { SERVER_NAME, SERVER_VERSION, type Exporter } from "./bridge.js";
 import { z } from "zod";
 import { readFile } from "node:fs/promises";
 import { isAbsolute } from "node:path";
-import { summarizeExport, validateFiles } from "./assets.js";
+import { assessPreview, summarizeExport, validateFiles } from "./assets.js";
 import { WORKFLOW_INSTRUCTIONS } from "./flow.js";
 import { guidanceFor, guidanceTags } from "./guidance.js";
 import type { ActualLayout } from "./geometry.js";
@@ -13,7 +13,7 @@ const flowBoxSchema = z.object({ display: z.string(), position: z.string(), cssF
 
 export function createMCPServer(exporter: Exporter): McpServer {
   const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION }, {
-    instructions: "Keep the existing figma_* tool names. Load standards progressively: do not assume unread rules — call figma_guidance with the guidanceTags carried by each semantic-plan container/repeatGroup/interaction, or with stage tags (workflow/baseline/flow/style), layer-property tags (image/gradient/text/clipping/mask/paint) or the subagent tag for delegation guidance. Preserve data-d2c-id on every layer and data-d2c-root on selection roots. If the agent supports subagents, run generation/refactor/validation inside subagents and open several in parallel. passed=true is automated-only; visualAcceptance stays not-verified. " + WORKFLOW_INSTRUCTIONS,
+    instructions: "PREVIEW-FIRST IS MANDATORY, NOT OPTIONAL. After figma_export, do not write code yet: open previewHtmlPath, read previewCssPath and generationManifestPath, assess the preview with figma_assess_preview, and use the preview as the implementation base. Baseline validation is blocked without previewAssessmentPath. Keep existing figma_* tool names and load detailed standards progressively with figma_guidance. Preserve data-d2c-id on every layer and data-d2c-root on selection roots. passed=true is automated-only; visualAcceptance stays not-verified. " + WORKFLOW_INSTRUCTIONS,
   });
   const result = async (operation: () => Promise<unknown>): Promise<CallToolResult> => {
     try {
@@ -43,7 +43,7 @@ export function createMCPServer(exporter: Exporter): McpServer {
     return guidanceFor(args.tags);
   }));
   server.registerTool("figma_export", {
-    description: "Export visible design layers while keeping this existing tool name. Default mode=figma reads the live plugin selection. mode=pen reads a local .pen document. Writes the full design/plans/assets plus generation-manifest.json and a model-free preview/index.html + preview.css. The default tool response is a compact summary with counts and file paths; use responseMode=full only when the caller truly needs the full design in context.",
+    description: "Export visible design layers and create the mandatory first implementation candidate at previewHtmlPath. STOP after export: open previewHtmlPath, read previewCssPath and generationManifestPath, then call figma_assess_preview before writing code. Do not bypass or replace the preview by starting from design.json. Default mode=figma reads the live selection; mode=pen reads a local .pen document. responseMode=summary is preferred.",
     inputSchema: {
       mode: z.enum(["figma", "pen"]).optional().describe("Design source; defaults to figma."),
       penPath: z.string().refine(isAbsolute, "Use an absolute .pen path").optional().describe("Required with mode=pen."),
@@ -61,12 +61,28 @@ export function createMCPServer(exporter: Exporter): McpServer {
     if (args.mode === "pen" && !args.penPath) throw new Error("mode=pen requires penPath");
     return exporter.export(extra.signal, exportOptions).then(data => responseMode === "full" ? data : summarizeExport(data));
   }));
+  const assessmentItemSchema = z.object({
+    description: z.string().trim().min(5).describe("Concrete preview decision or problem observed after reading/rendering the preview."),
+    nodeIds: z.array(z.string().min(1)).min(1).describe("Exported data-d2c-id values affected by this observation."),
+  });
+  server.registerTool("figma_assess_preview", {
+    description: "MANDATORY gate immediately after figma_export and before implementation. First open/render previewHtmlPath and read previewCssPath plus generationManifestPath. Then record what the deterministic preview already gets right and must be preserved, plus targeted gaps/actions. Returns previewAssessmentPath required by baseline validation. Generic claims or unknown node IDs are rejected.",
+    inputSchema: {
+      designPath: z.string().refine(isAbsolute).describe("designPath returned by the same figma_export."),
+      assessment: z.object({
+        summary: z.string().trim().min(20).describe("Concrete overall assessment of the rendered preview as the implementation starting point."),
+        preserve: z.array(assessmentItemSchema).min(1).describe("Correct preview structure/styles to retain rather than regenerate."),
+        gaps: z.array(assessmentItemSchema.extend({ action: z.string().trim().min(5).describe("Targeted code change based on this preview gap.") })).min(1).describe("Observed preview gaps and targeted changes; do not list speculative redesigns."),
+      }),
+    },
+  }, async (args) => result(() => assessPreview(args.designPath, args.assessment)));
   server.registerTool("figma_validate_layout", {
-    description: "Two-stage validation: phase=baseline first; after success refactor real HTML/CSS into flex/grid/block document flow and remeasure, then phase=flow with baselineReportPath. Only workflowComplete=true completes both automated stages. Compare actual browser DOM rectangles with an exported design.json. Returns pass/fail, missing/duplicate/unexpected IDs, hierarchy mismatches, propertyMismatches (clipping, opacity, radii, text metrics, gradient direction/stops), reviewRequired, and per-layer left/top/right/bottom/width/height deltas and a saved full report. Fix failed layers parent-first, rerender and repeat until passed; do not claim completion on failure. Actual data must come from the exported collector, not estimates.",
+    description: "Two-stage validation. Baseline is rejected unless figma_assess_preview was completed and its previewAssessmentPath is supplied; this enforces using the deterministic preview as the implementation base. After baseline success, refine normal document flow and remeasure for phase=flow with baselineReportPath. Only workflowComplete=true completes automated stages. Actual data must come from the exported collector, not estimates.",
     inputSchema: {
       designPath: z.string().refine(isAbsolute),
       mode: z.enum(["figma", "pen"]).optional().describe("Optional source assertion. When supplied it must match design.json meta.sourceMode."),
       phase: z.enum(["baseline", "flow"]).optional().describe("Default baseline. Its success is not completion: refactor to document flow and run phase=flow next."),
+      previewAssessmentPath: z.string().refine(isAbsolute).optional().describe("Required for baseline: accepted receipt returned by figma_assess_preview for this designPath."),
       baselineReportPath: z.string().refine(isAbsolute).optional().describe("Required for flow: reportPath of a successful baseline for the unchanged design; new sample, same viewport, no looser tolerance."),
       flowExceptions: z.array(z.object({ id: z.string(), reason: z.string().trim().min(1) })).optional().describe("Explicit overlay exceptions for source ABSOLUTE nodes or leaf shapes only; ordinary containers and text cannot be exempted. Raster IMG offsets do not need exceptions."),
       actualPath: z.string().refine(isAbsolute).optional().describe("Absolute path to JSON returned by the exported DOM collector"),
@@ -91,8 +107,9 @@ export function createMCPServer(exporter: Exporter): McpServer {
     const designHeader = JSON.parse(await readFile(args.designPath, "utf8"));
     const sourceMode = designHeader?.meta?.sourceMode ?? "figma";
     if (args.mode && args.mode !== sourceMode) throw new Error(`Validation mode=${args.mode} does not match design source ${sourceMode}`);
+    if ((args.phase ?? "baseline") === "baseline" && !args.previewAssessmentPath) throw new Error("Preview-first gate: open previewHtmlPath, read previewCssPath and generationManifestPath, call figma_assess_preview, then retry baseline with previewAssessmentPath");
     const actual = args.actual ?? JSON.parse(await readFile(args.actualPath!, "utf8")) as ActualLayout;
-    const report = await validateFiles(args.designPath, actual, args.tolerance, { phase: args.phase, baselineReportPath: args.baselineReportPath, flowExceptions: args.flowExceptions });
+    const report = await validateFiles(args.designPath, actual, args.tolerance, { phase: args.phase, previewAssessmentPath: args.previewAssessmentPath, baselineReportPath: args.baselineReportPath, flowExceptions: args.flowExceptions });
     const { layers, failed, reviewRequired, flowMismatches, ...summary } = report;
     return { ...summary, flowMismatches: flowMismatches.slice(0, 30), flowMismatchCount: flowMismatches.length, failed: failed.slice(0, 30), failedCount: failed.length, reviewRequired: reviewRequired.slice(0, 30), reviewRequiredCount: reviewRequired.length, detail: "Full layer results and pending visual reviews saved at reportPath. passed covers the current stage only; require workflowComplete=true for both stages. Neither proves visual acceptance." };
   }));

@@ -13,7 +13,7 @@ const box = (x, y, width, height) => ({ x, y, width, height });
 const text = (id, name, x, y, value) => ({ id, name, type: "TEXT", absoluteBounds: box(x, y, 180, 20), characters: value, fontName: { family: "Arial", style: "Regular" }, fontSize: 16, fontWeight: 400, lineHeight: { css: "20px" }, letterSpacing: { css: "0px" }, textAlignHorizontal: "LEFT", textColor: { css: "rgb(17, 17, 17)" }, fills: [{ type: "SOLID", color: "rgb(17, 17, 17)" }] });
 const row = (index, y) => ({ id: `row-${index}`, name: `Row ${index}`, type: "FRAME", absoluteBounds: box(20, y, 260, 40), children: [text(`label-${index}`, `Label ${index}`, 30, y + 10, `Item ${index}`)] });
 const design = {
-  meta: { schemaVersion: 3, exporterVersion: "3.4.1" }, assets: {},
+  meta: { schemaVersion: 3, exporterVersion: "3.5.0" }, assets: {},
   nodes: [{ id: "root", name: "Preview", type: "FRAME", absoluteBounds: box(0, 0, 300, 300), children: [
     { id: "background", name: "Background", type: "RECTANGLE", absoluteBounds: box(0, 0, 300, 300), fills: [{ type: "SOLID", color: "rgb(255, 255, 255)" }] },
     { id: "list", name: "List", type: "FRAME", absoluteBounds: box(20, 50, 260, 160), children: [row(1, 50), row(2, 90), row(3, 130)] },
@@ -40,7 +40,7 @@ test("model-free preview preserves the complete tree and emits background, flow 
 
 test("atomic raster assets do not repaint vector fills or strokes on their rectangular wrappers", () => {
   const atomic = generatePreview({
-    meta: { schemaVersion: 3, exporterVersion: "3.4.1" },
+    meta: { schemaVersion: 3, exporterVersion: "3.5.0" },
     assets: { icon: { id: "icon", relativePath: "images/icon.png" } },
     nodes: [{ id: "atomic-root", name: "Atomic", type: "FRAME", absoluteBounds: box(0, 0, 40, 40), children: [{
       id: "atomic-icon", name: "Vector icon", type: "VECTOR", renderAs: "image", assetId: "icon", rotation: 90, opacity: 0.5,
@@ -55,4 +55,29 @@ test("atomic raster assets do not repaint vector fills or strokes on their recta
   assert.equal(wrapperRule.includes("rotate"), false);
   assert.equal(wrapperRule.includes("opacity"), false);
   assert.equal(atomic.manifest.reviewRequired.some(item => item.id === "atomic-icon"), false);
+});
+
+test("styled text ranges render as selectable spans with external CSS", () => {
+  const preview = generatePreview({
+    meta: { schemaVersion: 3, exporterVersion: "3.5.0" }, assets: {},
+    nodes: [{ id: "text-root", name: "Text", type: "FRAME", absoluteBounds: box(0, 0, 240, 40), children: [{
+      ...text("mixed-text", "Mixed", 0, 0, "Get 10 tickets"),
+      styledTextSegments: [
+        { start: 0, end: 4, characters: "Get ", fontName: { family: "Arial", style: "Regular" }, fontSize: 16, fontWeight: 400, lineHeight: { css: "20px" }, letterSpacing: { css: "0px" }, textDecoration: "NONE", textCase: "ORIGINAL", textColor: { css: "rgb(17, 17, 17)" } },
+        { start: 4, end: 6, characters: "10", fontName: { family: "Arial", style: "Bold" }, fontSize: 16, fontWeight: 700, lineHeight: { css: "20px" }, letterSpacing: { css: "0px" }, textDecoration: "NONE", textCase: "ORIGINAL", textColor: { css: "rgb(255, 51, 0)" } },
+        { start: 6, end: 14, characters: " tickets", fontName: { family: "Arial", style: "Regular" }, fontSize: 16, fontWeight: 400, lineHeight: { css: "20px" }, letterSpacing: { css: "0px" }, textDecoration: "NONE", textCase: "ORIGINAL", textColor: { css: "rgb(17, 17, 17)" } },
+      ],
+    }] }],
+  });
+  assert.equal((preview.html.match(/class="d2c-text-segment/g) ?? []).length, 3);
+  assert.match(preview.html, /data-d2c-text-start="4" data-d2c-text-end="6">10<\/span>/);
+  assert.match(preview.css, /\.d2c-n-2-text-2 \{[^}]*font-weight:700[^}]*color:rgb\(255, 51, 0\)/);
+  const textRule = preview.css.match(/\.d2c-n-2 \{([^}]+)\}/)?.[1] ?? "";
+  assert.match(textRule, /white-space:pre/);
+  assert.match(textRule, /overflow-wrap:normal/);
+  assert.match(textRule, /word-break:normal/);
+  assert.equal(textRule.includes("pre-wrap"), false);
+  assert.equal(textRule.includes("anywhere"), false);
+  assert.match(preview.css, /\.d2c-text-segment \{ white-space:inherit; \}/);
+  assert.equal(preview.html.includes("style="), false);
 });
