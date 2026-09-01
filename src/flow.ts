@@ -13,7 +13,7 @@ export interface ValidationOptions {
   previewAssessmentPath?: string;
   flowExceptions?: FlowException[];
 }
-export const WORKFLOW_INSTRUCTIONS = "Mandatory preview-first sequence: after figma_export, OPEN previewHtmlPath and READ previewCssPath plus generationManifestPath before writing or replacing implementation code. Treat that deterministic preview as the first implementation candidate: explicitly assess what it already gets right, what must change, and which exported node IDs are affected; then call figma_assess_preview and keep its previewAssessmentPath. Do not start from a blank page and do not bypass the preview with design.json. Only use design.json and the detailed plans for targeted gaps found during preview assessment or validation. Baseline validation rejects calls without the accepted previewAssessmentPath. After assessment, validate baseline geometry/styles first (phase=baseline), then refine the real page in normal document flow and validate again (phase=flow with the successful baselineReportPath; never reuse measurements or relax tolerance). Load detailed standards on demand with figma_guidance (workflow, baseline, flow, style and node guidanceTags). Only workflowComplete=true completes the automated workflow; visual review remains separate. Build directly in document flow (block/inline/flex/grid). Exported absolute coordinates are reference measurements, not a requirement to use absolute positioning. Hard constraint: grid/flex must match semantic-plan layoutStrategy; unjustified grid/flex fails flow and cannot be exempted.";
+export const WORKFLOW_INSTRUCTIONS = "Mandatory preview-first sequence: after figma_export, OPEN previewHtmlPath and READ previewCssPath plus generationManifestPath before writing or replacing implementation code. Treat that deterministic preview as the first implementation candidate: assess what it gets right, what must change, and affected exported IDs; then call figma_assess_preview. Do not restart from design.json. Baseline requires previewAssessmentPath. After assessment, validate baseline, then refine normal document flow and validate phase=flow with the successful baselineReportPath. CSS Grid is forbidden: never emit display:grid or inline-grid on a design node or structural wrapper. Use block/flow-root, inline/inline-block and justified Flex; for overlap, keep content in flow and restrict positioning to backgrounds, decorations or source-absolute leaves. Only workflowComplete=true completes automated stages; visual review remains separate.";
 
 function exceptionCandidate(node: Layer): boolean {
   if (node.id === node.rootId) return false;
@@ -28,8 +28,8 @@ export function flowPlan(input: unknown) {
     stages: ["baseline", "flow"],
     rules: [
       "Build the first version directly in document flow; do not generate an absolute-positioned draft and then convert it. Save a working checkpoint before the flow validation and adjust parent containers first, then children.",
-      "HARD CONSTRAINT: a container using display:grid or display:flex must match its semantic-plan layoutStrategy. grid is allowed only when layoutStrategy=grid/grid-overlay; flex is allowed only when layoutStrategy=flex-row/flex-column. The flow validator rejects unjustified grid/flex and this is never exemptable.",
-      "Use block flow for ordinary vertical structure and inline/inline-block for simple horizontal content. Promote to flex only for dynamic distribution, fill/stretch or wrap; promote to grid only for two-dimensional alignment or paint stacks.",
+      "HARD CONSTRAINT: display:grid and inline-grid are forbidden on every generated design node and anonymous structural wrapper; this is never exemptable. Flex is allowed only when layoutStrategy=flex-row/flex-column.",
+      "Use block flow for ordinary vertical structure and inline/inline-block for simple horizontal content. Promote to flex only for dynamic distribution, fill/stretch or wrapping rows. Overlap uses layered-flow: normal content stays in flow; only backgrounds, decorations or source-absolute leaves may be positioned.",
       "Source Auto Layout is evidence about order, padding, gap and sizing, not an instruction to always emit display:flex. Coordinates alone do not determine a unique flow layout.",
       "Keep data-d2c-id and the nearest labelled parent. Anonymous structural wrappers must have a semantic role and must not introduce out-of-flow positioning or visual effects.",
       "Normal content uses static/relative/sticky positioning. No absolute/fixed wrappers, floats, nonzero relative insets, negative margins or translation tricks to fake document flow.",
@@ -66,17 +66,15 @@ function boxIssues(box: FlowBox | undefined): string[] {
   return issues;
 }
 
-// Hard constraint: the layout primitive an implementation actually uses must not
-// be heavier than the semantic-plan layoutStrategy. grid/flex are only justified
-// when the source genuinely requires them; this is never exemptable.
+// Grid is globally forbidden for generated design nodes and structural wrappers.
+// Flex remains gated by semantic-plan layoutStrategy.
 function layoutPrimitiveIssues(display: string | undefined, strategy: { preferred: string; necessity: string } | undefined): string[] {
-  if (!display || !strategy) return [];
+  if (!display) return [];
   const issues: string[] = [];
   const isGrid = display === "grid" || display === "inline-grid";
   const isFlex = display === "flex" || display === "inline-flex";
-  if (isGrid && !["grid", "grid-overlay"].includes(strategy.preferred)) {
-    issues.push(`grid-not-justified (layoutStrategy prefers ${strategy.preferred}/${strategy.necessity}): grid requires two-dimensional alignment or an overlapping paint stack`);
-  }
+  if (isGrid) issues.push(`grid-forbidden${strategy ? ` (layoutStrategy prefers ${strategy.preferred}/${strategy.necessity})` : ""}: use block/inline/flex or restricted layered-flow`);
+  if (!strategy) return issues;
   if (isFlex && !["flex-row", "flex-column"].includes(strategy.preferred)) {
     issues.push(`flex-not-justified (layoutStrategy prefers ${strategy.preferred}/${strategy.necessity}): flex requires dynamic distribution, fill/stretch or wrap`);
   }
@@ -98,9 +96,12 @@ export function validateFlow(input: unknown, actual: ActualLayout, exceptions: F
     // Even exempted nodes require a complete sample; wrappers are never exempt.
     const issues = boxIssues(style).filter(issue => issue === "missing-flow-style" || !approved.has(node.id));
     if (!Array.isArray(style?.wrappers)) issues.push("missing-flow-wrappers");
-    else style.wrappers.forEach((box, index) => issues.push(...boxIssues(box).map(issue => `wrapper[${index}].${issue}`)));
+    else style.wrappers.forEach((box, index) => {
+      issues.push(...boxIssues(box).map(issue => `wrapper[${index}].${issue}`));
+      if (box.display === "grid" || box.display === "inline-grid") issues.push(`wrapper[${index}].grid-forbidden`);
+    });
     if (style && measured?.renderStyle && style.position !== measured.renderStyle.position) issues.push("inconsistent-position-sample");
-    // Hard constraint: justify every grid/flex container; never exemptable.
+    // Hard constraint: reject every Grid and justify each Flex; never exemptable.
     issues.push(...layoutPrimitiveIssues(style?.display, containers.get(node.id)?.layoutStrategy));
     if (issues.length) mismatches.push({ id: node.id, issues });
   }

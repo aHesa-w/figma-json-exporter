@@ -4,7 +4,7 @@ export const SEMANTIC_INSTRUCTIONS = "Read semantic-plan.json before the flow re
 
 type OrderingPolicy = "visual-reading-order" | "preserve-design-paint-order";
 type InteractionAutonomy = "safe-local" | "callback-only" | "blocked";
-type LayoutPrimitive = "block-flow" | "inline-flow" | "flex-row" | "flex-column" | "grid" | "grid-overlay";
+type LayoutPrimitive = "block-flow" | "inline-flow" | "flex-row" | "flex-column" | "layered-flow";
 
 interface LayoutStrategy {
   preferred: LayoutPrimitive;
@@ -101,12 +101,22 @@ function overlap(a: Layer, b: Layer): boolean {
     && Math.min(ar.bottom, br.bottom) - Math.max(ar.top, br.top) > 0.5;
 }
 
+// Reading order groups siblings by their positioning midlines, not their top/left
+// edges: two boxes whose vertical centers align are the same visual row even when
+// their tops differ (e.g. a tall avatar next to a short label).
+const midX = (layer: Layer) => layer.absoluteBounds.x + layer.absoluteBounds.width / 2;
+const midY = (layer: Layer) => layer.absoluteBounds.y + layer.absoluteBounds.height / 2;
+
+function rowTolerance(a: Layer, b: Layer): number {
+  return Math.max(2, Math.min(a.absoluteBounds.height, b.absoluteBounds.height) * 0.5);
+}
+
 function visualCompare(a: Layer, b: Layer): number {
-  const ar = a.absoluteBounds, br = b.absoluteBounds;
-  const rowTolerance = Math.max(2, Math.min(ar.height, br.height) * 0.25);
-  if (Math.abs(ar.y - br.y) > rowTolerance) return ar.y - br.y;
-  if (Math.abs(ar.x - br.x) > 0.5) return ar.x - br.x;
-  return ar.y - br.y;
+  const dY = midY(a) - midY(b);
+  if (Math.abs(dY) > rowTolerance(a, b)) return dY;
+  const dX = midX(a) - midX(b);
+  if (Math.abs(dX) > 0.5) return dX;
+  return dY;
 }
 
 function axisCompare(axis: "x" | "y") {
@@ -124,8 +134,8 @@ function inferLayoutStrategy(node: Layer, children: Layer[], hasOverlap: boolean
   const auto = node.autoLayout as Record<string, unknown> | undefined;
   const mode = auto?.mode, wrap = auto?.layoutWrap === "WRAP", primary = auto?.primaryAxisAlignItems;
   const grows = children.some(child => Number(child.layoutGrow ?? 0) > 0 || child.layoutAlign === "STRETCH");
-  const avoid = ["Do not convert child x/y values into per-child positioning margins", "Do not introduce anonymous flex/grid wrappers without a structural role"];
-  if (hasOverlap) return { preferred: "grid-overlay", necessity: "required", reason: "Siblings overlap in the paint stack; a shared grid area preserves normal flow and paint order", avoid };
+  const avoid = ["Do not convert child x/y values into per-child positioning margins", "CSS Grid is forbidden", "Do not introduce anonymous wrappers without a structural role"];
+  if (hasOverlap) return { preferred: "layered-flow", necessity: "required", reason: "Siblings overlap; keep content in normal flow and limit positioning to backgrounds, decorations or source-absolute leaves", avoid };
   if (mode === "HORIZONTAL" && wrap) return { preferred: "flex-row", necessity: "required", reason: "Source layout wraps horizontally; flex-wrap is the lightest primitive that preserves the dynamic row flow", avoid };
   if (mode === "HORIZONTAL") {
     if (primary === "SPACE_BETWEEN" || grows) return { preferred: "flex-row", necessity: "required", reason: "Horizontal children use dynamic distribution or fill/stretch sizing", avoid };
@@ -137,7 +147,7 @@ function inferLayoutStrategy(node: Layer, children: Layer[], hasOverlap: boolean
   }
   if (separatedOnAxis(children, "y")) return { preferred: "block-flow", necessity: "lightweight-default", reason: "Children form one non-overlapping top-to-bottom sequence", avoid };
   if (separatedOnAxis(children, "x")) return { preferred: "inline-flow", necessity: "lightweight-default", reason: "Children form one non-overlapping left-to-right sequence", avoid };
-  return { preferred: "grid", necessity: "required", reason: "Children form a non-overlapping two-dimensional arrangement that cannot be expressed as one block or inline sequence", avoid };
+  return { preferred: "flex-row", necessity: "required", reason: "Children form non-overlapping visual rows; use a wrapping flex row because CSS Grid is forbidden", avoid };
 }
 
 function semanticContainers(nodes: Layer[]): SemanticContainer[] {
@@ -339,9 +349,9 @@ function tabProminence(node: Layer): number {
 
 function sameBand(a: Layer, b: Layer): boolean {
   const ab = a.absoluteBounds, bb = b.absoluteBounds;
-  const rowTolerance = Math.max(2, Math.min(ab.height, bb.height) * 0.25);
-  const colTolerance = Math.max(2, Math.min(ab.width, bb.width) * 0.25);
-  return Math.abs(ab.y - bb.y) <= rowTolerance || Math.abs(ab.x - bb.x) <= colTolerance;
+  const row = Math.max(2, Math.min(ab.height, bb.height) * 0.5);
+  const col = Math.max(2, Math.min(ab.width, bb.width) * 0.5);
+  return Math.abs(midY(a) - midY(b)) <= row || Math.abs(midX(a) - midX(b)) <= col;
 }
 
 function assignTabInference(candidates: InteractionCandidate[], nodes: Layer[]): void {
@@ -490,8 +500,8 @@ export function semanticPlan(input: unknown) {
     repeatGroups: repeats,
     interactions,
     policies: {
-      layoutPrimitives: "Use block flow first, inline/inline-block for simple horizontal content, flex only for dynamic distribution/wrap, and grid only for two-dimensional alignment or overlap",
-      flexGridGate: "Every flex/grid container must be justified by layoutStrategy. Do not use universal display:grid/flex as a coordinate-placement mechanism",
+      layoutPrimitives: "CSS Grid is forbidden. Use block flow first, inline/inline-block for simple horizontal content, flex for dynamic distribution or wrapping rows, and layered-flow for restricted paint overlap",
+      flexGridGate: "Every flex container must be justified by layoutStrategy. display:grid and inline-grid are forbidden on generated design nodes and structural wrappers",
       frameworkRepeats: "Generate data-driven loops/components and preserve each concrete instance data-d2c-id plus a stable key",
       plainHtmlRepeats: "Keep expanded DOM and wrap repeated instances with the supplied d2c-repeat comments",
       interactionThresholds: { safeLocal: 0.85, callbackOnly: 0.75 },

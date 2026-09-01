@@ -69,10 +69,14 @@ test("standalone compiled entry auto-starts shared service; stdio and HTTP expos
   const f = await fixture(t);
   const stdio = await f.client();
   const http = await f.client("http");
-  assert.equal((await (await fetch(f.base + "/health")).json()).version, "3.11.1");
+  assert.equal((await (await fetch(f.base + "/health")).json()).version, "3.12.1");
   for (const client of [stdio, http]) {
     assert.deepEqual((await client.listTools()).tools.map((tool) => tool.name).sort(), ["figma_assess_preview", "figma_export", "figma_guidance", "figma_status", "figma_validate_layout"]);
     assert.equal(payload(await client.callTool({ name: "figma_status", arguments: {} })).connected, false);
+    assert.equal(payload(await client.callTool({ name: "figma_status", arguments: { mode: "figma", penPath: "~/ignored.pen" } })).connected, false);
+    const relativePenStatus = await client.callTool({ name: "figma_status", arguments: { mode: "pen", penPath: "relative.pen" } });
+    assert.equal(relativePenStatus.isError, true);
+    assert.match(relativePenStatus.content[0].text, /absolute \.pen path or a ~\//);
     const guidance = payload(await client.callTool({ name: "figma_guidance", arguments: { tags: ["tab", "unknown-tag"] } }));
     assert.equal(guidance.guidance.tab.title, "Tab interaction");
     assert.match(guidance.guidance.tab.guidance, /tablist\/tab\/tabpanel/);
@@ -80,6 +84,8 @@ test("standalone compiled entry auto-starts shared service; stdio and HTTP expos
     const catalog = payload(await client.callTool({ name: "figma_guidance", arguments: {} }));
     assert.ok(catalog.availableTags.includes("workflow"));
     assert.ok(catalog.availableTags.includes("subagent"));
+    assert.ok(catalog.availableTags.includes("layered-flow"));
+    assert.equal(catalog.availableTags.includes("grid"), false);
     const error = await client.callTool({ name: "figma_export", arguments: {} });
     assert.equal(error.isError, true);
     assert.match(error.content[0].text, /not connected/);

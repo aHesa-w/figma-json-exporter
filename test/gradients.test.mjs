@@ -94,5 +94,5 @@ test("complex gradient containers/strokes rasterize while simple linear fills re
   assert.equal(result.type, "done", result.message);
   assert.equal(result.data.nodes[0].children.length, 1);
   for (const n of result.data.nodes.slice(1, 6)) { assert.equal(n.renderAs, "image"); assert.equal(n.rasterReason, "complex-gradient"); assert.equal(n.children, undefined); }
-  assert.equal(result.data.nodes[6].renderAs, undefined);
+  assert.deepEqual(result.data.nodes.map((n) => n.id), ["linear", "GRADIENT_RADIAL", "GRADIENT_ANGULAR", "GRADIENT_DIAMOND", "multi", "stroke"]);
 });

@@ -107,7 +107,7 @@ Pen 模式直接读取本地 `.pen` JSON，不依赖 Figma 插件，也不要求
 MCP 默认要求两个阶段，导出的绝对坐标只是比较依据，不要求最终 HTML 全部使用绝对定位：
 
 1. **baseline**：完成第一版还原，实测全部图层的几何、样式和图片。`passed: true` 只表示首轮通过，此时 `workflowComplete: false`，不能结束任务。
-2. **文档流与语义重构**：Agent 保存可回退的首版，读取 `flow-plan.json` 和 `semantic-plan.json`，从父容器开始按 `block → inline/inline-block → flex → grid` 的优先级重构真实页面。普通纵向结构使用块流，简单横向内容使用 inline/inline-block；只有动态分配、fill/stretch、换行时使用 Flex，只有二维对齐或重叠绘制栈时使用 Grid。不得把 Auto Layout 机械转换成 Flex/Grid，也不得用每个子项的 x/y margin 复刻坐标。代码按安全的 `codeOrder` 从上到下、从左到右编排；重叠绘制栈保留设计顺序。框架目标将重复结构改为数据循环，纯 HTML 保留展开 DOM 并加入 `d2c-repeat` 注释；只自动实现 `safe-local` 交互，`callback-only` 不得虚构路由、API 或持久化。保留图层 ID 和设计层级，可增加具有明确结构语义且不带 ID 的包装层，不得通过删层或更改目标坐标规避校验。
+2. **文档流与语义重构**：Agent 保存可回退的首版，读取 `flow-plan.json` 和 `semantic-plan.json`，从父容器开始按 `block → inline/inline-block → flex` 重构真实页面。CSS Grid 已全面禁用：设计节点和匿名结构包装层使用 `display:grid/inline-grid` 都会使 flow 失败且不能豁免。普通纵向结构使用块流，简单横向内容使用 inline/inline-block；动态分配、fill/stretch 或二维非重叠行列使用 Flex/`flex-wrap`。重叠结构使用 `layered-flow`：真实内容留在文档流，全尺寸背景优先合并为父级绘制或伪元素，仅背景、装饰、源设计 absolute 节点或叶子形状允许受限定位。不得用每个子项的坐标 margin 复刻布局。代码按安全的 `codeOrder` 编排并保留图层 ID、设计层级、重复结构和安全本地交互。
 3. **flow**：重新运行采集器，在与首轮相同的视口和 DPR 下提交新数据，并引用首轮成功报告。再次执行原有全部几何/样式校验，同时检查文档流约束。失败就调整页面、重新采集并重试；只有 `workflowComplete: true` 表示两个自动阶段均通过。
 
 Agent 调用示例（路径替换为实际文件）：
@@ -134,13 +134,13 @@ Agent 调用示例（路径替换为实际文件）：
 
 第二轮不能省略成功基线，不能引用另一份设计或已修改的设计文件，不能复用基线采样 ID 或提交早于基线通过时间的采样。省略第二轮 tolerance 时继承基线容差，显式指定时不能放宽。保存的基线会重新做自动检查；这些检查防止流程误用，不是浏览器采样来源的密码学证明，也不能替代真实测量。
 
-**文档流约定**：普通内容及选区内的匿名包装层不能使用 absolute/fixed、float、非零 relative 偏移、负 margin 或 translate/矩阵平移来拼坐标；static、无偏移 relative、sticky，以及 Flex/Grid/块布局可用。这是本工具的保守实现约定，不表示 CSS 中这些特性都不合法。[CSS 定位与正常流](https://www.w3.org/TR/css-position-3/)
+**文档流约定**：普通内容及选区内的匿名包装层不能使用 absolute/fixed、float、非零 relative 偏移、负 margin 或 translate/矩阵平移来拼坐标；可使用 static、无偏移 relative、sticky、块/行内布局及语义计划允许的 Flex。CSS Grid 在生成产物中全面禁用。这是本工具的保守实现约定，不表示 CSS 中这些特性都不合法。[CSS 定位与正常流](https://www.w3.org/TR/css-position-3/)
 
 图片内部为保留外描边/阴影而设置的 IMG 绝对偏移不受文档流限制，带 `data-d2c-id` 的外层仍需参与文档流。源设计明确 `layoutPositioning: ABSOLUTE` 的非根节点或叶子形状可通过 `flowExceptions: [{"id":"...","reason":"具体叠加用途"}]` 逐项说明例外；普通文本/容器不允许任意豁免，匿名包装层也不随例外豁免。例外会列为待复核，不能把整页都标成例外。
 
 新增报告字段：`phase`、`workflowComplete`、`baselineReportPath`、`flowMismatches`、`flowExceptions`。首轮通过后的 `nextAction` 会明确要求重构并进行第二轮。`semantic-plan.json` 提供源码编排建议，并不伪装成源码或交互自动验收；自动验收仍不证明像素、响应式行为、完整交互或代码质量。MCP 负责约束和比较，HTML/CSS 修改与浏览器执行由 Agent 完成，不会自行重写用户页面。
 
-本次服务版本为 **3.11.1**，Figma 插件仍为 **3.5.0**。可选择 DOM 文字默认禁止浏览器软换行，仅保留源文本中的显式换行；3.11.0 的 `PREVIEW_ASSESSMENT_REQUIRED` 门禁和 3.10.0 的混合文字分段能力保持不变。采集器仍为 **collectorVersion: 5**。升级后需重启共享服务并重新连接客户端 MCP，Figma 插件代码未变时无需再次导入。
+本次服务版本为 **3.12.1**，Figma 插件仍为 **3.5.0**。`figma_status` 在 Figma 模式下忽略误带的 `penPath`；Pen 模式支持绝对路径和 `~/...`，相对路径返回可恢复的工具错误而不是 MCP `-32602`。3.12.0 的全面禁用 Grid、此前 preview-first 门禁、混合文字分段和 DOM 文字禁止软换行保持不变；采集器仍为 **collectorVersion: 5**。
 
 ## 图片先落盘，JSON 后返回
 
@@ -163,7 +163,7 @@ export-<uuid>/
   collector-expression.js  浏览器工具可执行的采集表达式
 ```
 
-节点树还保留填充、描边、效果、圆角、文本、字体、Auto Layout、约束和组件引用。基础预览保留每个 `data-d2c-id`，将明显覆盖父容器且位于内容下方的视觉层标为背景；非重叠序列使用 block/inline/flex，重叠和二维关系使用 grid-overlay 默认方案。通用相似结构写入 repeat 元数据并保留展开 HTML；不生成 Tab 专用行为。`renderAs: "image"` 的原子矢量由 PNG 表达真实轮廓，预览不会再把其 fill、stroke、旋转或透明度重复应用到矩形包围盒，避免图标周围出现黑白色块和伪边框。图片字节从 Figma 插件传至本机服务，所有文件写完后才原子发布目录并返回结果。缺图、读取失败、未知图片格式或写入失败都会使导出失败，不能返回假路径。支持 PNG/JPEG/GIF/WebP 原图；单张图片字节上限 32MB，单次累计 128MB，导出超时 120 秒。
+节点树还保留填充、描边、效果、圆角、文本、字体、Auto Layout、约束和组件引用。基础预览保留每个 `data-d2c-id`；纵向、横向和二维非重叠结构分别使用 block、inline 和可换行 Flex，重叠结构使用无 Grid 的 `layered-flow`。真实内容保持文档流，明显背景/装饰层才使用受限定位并进入复核清单。通用相似结构写入 repeat 元数据并保留展开 HTML；不生成 Tab 专用行为。`renderAs: "image"` 的原子矢量由 PNG 表达真实轮廓，预览不会把 fill、stroke、旋转或透明度重复应用到矩形包围盒。图片字节全部落盘后才原子发布目录；缺图、未知格式或写入失败都会使导出失败。
 
 - `meta.schemaVersion = 3`；`meta.designPath`、`meta.layoutPath`、`meta.semanticPlanPath` 等为本机绝对路径。
 - `meta.exporterVersion = "3.5.0"` 标识支持分段文字的新版插件已加载；升级后应关闭并重新打开 Figma 插件。服务会拒绝旧插件的新导出，避免混合文字继续静默栅格化；旧版 v3 JSON 仍可用于校验诊断。

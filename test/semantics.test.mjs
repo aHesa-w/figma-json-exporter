@@ -26,11 +26,12 @@ test("semantic plan emits top-to-bottom then left-to-right code order independen
   assert.deepEqual(root.designOrder, ["third", "second", "first"]);
   assert.deepEqual(root.codeOrder, ["first", "second", "third"]);
   assert.equal(root.orderPolicy, "visual-reading-order");
-  assert.equal(root.layoutStrategy.preferred, "grid");
+  assert.equal(root.layoutStrategy.preferred, "flex-row");
+  assert.match(root.layoutStrategy.reason, /Grid is forbidden/);
   assert.equal(plan.summary.reorderedContainerCount, 1);
 });
 
-test("layout strategy prefers lightweight block and inline flow before flex/grid", () => {
+test("layout strategy prefers lightweight block and inline flow before flex", () => {
   const vertical = semanticPlan(design([
     card("one", 1, 0, 0), card("two", 2, 0, 30), card("three", 3, 0, 60),
   ])).containers.find(container => container.id === "root");
@@ -54,7 +55,8 @@ test("overlapping siblings retain paint order instead of unsafe visual sorting",
   ]));
   const root = plan.containers.find(container => container.id === "root");
   assert.equal(root.orderPolicy, "preserve-design-paint-order");
-  assert.equal(root.layoutStrategy.preferred, "grid-overlay");
+  assert.equal(root.layoutStrategy.preferred, "layered-flow");
+  assert.match(root.layoutStrategy.reason, /keep content in normal flow/);
   assert.deepEqual(root.codeOrder, root.designOrder);
 });
 

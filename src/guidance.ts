@@ -24,7 +24,7 @@ export const GUIDANCE: GuidanceEntry[] = [
   {
     tag: "flow",
     title: "Document flow",
-    guidance: "Build the first version directly in normal document flow using the lightest primitive: block first, then inline/inline-block, then flex (dynamic distribution/fill/stretch/wrap), then grid (two-dimensional alignment or paint stacks). Preserve layer IDs and hierarchy. No absolute/fixed wrappers, floats, nonzero relative insets, negative margins or translate tricks to fake flow. HARD CONSTRAINT: a grid/flex container must match its layoutStrategy — grid only for grid/grid-overlay, flex only for flex-row/flex-column; unjustified grid/flex fails the flow stage and cannot be exempted. Exceptions need explicit per-layer reasons and are limited to source ABSOLUTE children or leaf shapes. Remeasure at the SAME viewport and call phase=flow with the successful baselineReportPath; do not relax tolerance.",
+    guidance: "Build in normal document flow using block first, then inline/inline-block, then justified flex. CSS Grid is forbidden: display:grid and inline-grid always fail flow and cannot be exempted. For layered-flow, keep real content in block/inline/flex flow; express broad backgrounds as parent paint or pseudo-elements where possible and position only decorations, source-absolute nodes or leaf shapes with explicit reasons. Preserve IDs and hierarchy; no absolute wrappers, floats, nonzero relative insets, negative margins or translate tricks. Remeasure at the same viewport and do not relax tolerance.",
   },
   {
     tag: "style",
@@ -41,32 +41,27 @@ export const GUIDANCE: GuidanceEntry[] = [
   {
     tag: "block-flow",
     title: "Block flow",
-    guidance: "Ordinary vertical structure maps to block flow. Use padding and adjacent-sibling spacing; do not convert child x/y values into per-child positioning margins, and do not introduce anonymous flex/grid wrappers without a structural role. HARD: display must be block/flow-root here — grid or flex fails the flow stage.",
+    guidance: "Ordinary vertical structure maps to block flow. Use padding and adjacent-sibling spacing; do not convert child x/y values into per-child positioning margins or introduce anonymous layout wrappers. HARD: display must be block/flow-root here — Grid is globally forbidden and unjustified Flex fails flow.",
   },
   {
     tag: "inline-flow",
     title: "Inline flow",
-    guidance: "A simple non-wrapping horizontal sequence uses inline/inline-block content with vertical-align and local spacing; avoid flex for a row that has no dynamic distribution, fill/stretch or wrap. HARD: display must be inline/inline-block here — grid or flex fails the flow stage.",
+    guidance: "A simple non-wrapping horizontal sequence uses inline/inline-block content with vertical-align and local spacing; avoid flex without dynamic distribution, fill/stretch or wrap. HARD: display must be inline/inline-block here — Grid is globally forbidden and unjustified Flex fails flow.",
   },
   {
     tag: "flex-row",
     title: "Flex row",
-    guidance: "Horizontal children that use dynamic distribution (SPACE_BETWEEN etc.), fill/stretch sizing or wrapping need flex-row; carry the source spacing/gap and alignment over, not per-child x/y margins. HARD: use flex here — grid is not justified and fails the flow stage.",
+    guidance: "Horizontal children that use dynamic distribution, fill/stretch sizing or visual row wrapping need flex-row; carry source spacing/gap/alignment over, not per-child coordinate margins. Use flex-wrap for inferred two-dimensional non-overlapping rows. Grid is globally forbidden.",
   },
   {
     tag: "flex-column",
     title: "Flex column",
-    guidance: "Vertical children that use dynamic distribution (CENTER/MAX/SPACE_BETWEEN) or fill/stretch sizing need flex-column. HARD: use flex here — grid is not justified and fails the flow stage.",
+    guidance: "Vertical children that use dynamic distribution (CENTER/MAX/SPACE_BETWEEN) or fill/stretch sizing need flex-column. Grid is globally forbidden.",
   },
   {
-    tag: "grid",
-    title: "Grid",
-    guidance: "Use grid only for a genuine two-dimensional alignment that cannot be expressed as one block or inline sequence. Do not use universal display:grid as a coordinate-placement mechanism. HARD: grid is justified here only; grid on any container whose layoutStrategy is not grid/grid-overlay fails the flow stage.",
-  },
-  {
-    tag: "grid-overlay",
-    title: "Grid overlay",
-    guidance: "Siblings overlap in the paint stack; a shared grid area preserves normal flow and paint order. Retain design order unless explicit z-index preserves the stack. HARD: grid is justified here; flex is not.",
+    tag: "layered-flow",
+    title: "Layered flow without Grid",
+    guidance: "Overlapping siblings retain design paint order without CSS Grid. Keep meaningful content in normal block/inline/flex flow. Prefer moving full-size visual backgrounds onto the parent or a pseudo-element; position only background/decorative leaves and source-absolute nodes inside a relative containing block. Complex overlap stays reviewRequired rather than degrading the whole container into a coordinate Grid.",
   },
 
   // ── 顺序策略 ─────────────────────────────────────────────────────────────

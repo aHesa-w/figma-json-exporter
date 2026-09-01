@@ -3,13 +3,20 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { SERVER_NAME, SERVER_VERSION, type Exporter } from "./bridge.js";
 import { z } from "zod";
 import { readFile } from "node:fs/promises";
-import { isAbsolute } from "node:path";
+import { homedir } from "node:os";
+import { isAbsolute, join } from "node:path";
 import { assessPreview, summarizeExport, validateFiles } from "./assets.js";
 import { WORKFLOW_INSTRUCTIONS } from "./flow.js";
 import { guidanceFor, guidanceTags } from "./guidance.js";
 import type { ActualLayout } from "./geometry.js";
 
 const flowBoxSchema = z.object({ display: z.string(), position: z.string(), cssFloat: z.string(), insets: z.array(z.string()).length(4), margins: z.array(z.string()).length(4), transform: z.string(), translate: z.string() });
+const localPath = (value: string | undefined): string | undefined => {
+  const trimmed = value?.trim();
+  if (!trimmed) return undefined;
+  if (trimmed === "~") return homedir();
+  return trimmed.startsWith("~/") ? join(homedir(), trimmed.slice(2)) : trimmed;
+};
 
 export function createMCPServer(exporter: Exporter): McpServer {
   const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION }, {
@@ -26,12 +33,15 @@ export function createMCPServer(exporter: Exporter): McpServer {
     description: "Check whether the selected design source is ready. Default mode=figma checks the open JSON Exporter plugin. mode=pen checks a local .pen document and lists its top-level nodes; Pen needs no exporter plugin.",
     inputSchema: {
       mode: z.enum(["figma", "pen"]).optional().describe("Design source; defaults to figma."),
-      penPath: z.string().refine(isAbsolute, "Use an absolute .pen path").optional().describe("Required with mode=pen: absolute path of the current .pen document."),
+      penPath: z.string().optional().describe("Pen mode only: absolute path or ~/... path of the current .pen document. Ignored when mode=figma."),
     },
   }, async (args, extra) => result(() => {
-    if ((args.mode ?? "figma") !== "pen" && args.penPath) throw new Error("penPath requires mode=pen");
-    if (args.mode === "pen" && !args.penPath) throw new Error("mode=pen requires penPath");
-    return exporter.status(extra.signal, args);
+    const mode = args.mode ?? "figma";
+    if (mode === "figma") return exporter.status(extra.signal, { mode });
+    const penPath = localPath(args.penPath);
+    if (!penPath) throw new Error("mode=pen requires penPath");
+    if (!isAbsolute(penPath)) throw new Error("Pen mode requires an absolute .pen path or a ~/... path");
+    return exporter.status(extra.signal, { mode, penPath });
   }));
   server.registerTool("figma_guidance", {
     description: "Load tag-indexed implementation and inference standards on demand, instead of reading all rules up front. Pass the guidanceTags carried by semantic-plan containers/repeatGroups/interactions, or stage tags (workflow/baseline/flow/style), layer-property tags (image/gradient/text/clipping/mask/paint) or the subagent tag for delegation guidance. Omit tags to list every available tag.",
@@ -46,7 +56,7 @@ export function createMCPServer(exporter: Exporter): McpServer {
     description: "Export visible design layers and create the mandatory first implementation candidate at previewHtmlPath. STOP after export: open previewHtmlPath, read previewCssPath and generationManifestPath, then call figma_assess_preview before writing code. Do not bypass or replace the preview by starting from design.json. Default mode=figma reads the live selection; mode=pen reads a local .pen document. responseMode=summary is preferred.",
     inputSchema: {
       mode: z.enum(["figma", "pen"]).optional().describe("Design source; defaults to figma."),
-      penPath: z.string().refine(isAbsolute, "Use an absolute .pen path").optional().describe("Required with mode=pen."),
+      penPath: z.string().optional().describe("Required with mode=pen: absolute path or ~/... path."),
       nodeIds: z.array(z.string().min(1)).min(1).optional().describe("Pen mode only: selected node/画板 IDs. Defaults to all non-reusable top-level nodes."),
       penBounds: z.array(z.object({ id: z.string().min(1), x: z.number(), y: z.number(), width: z.number().nonnegative(), height: z.number().nonnegative() })).optional().describe("Pen mode only: exact absolute bounds returned by the Pen engine for dynamic, rotated, ref, or otherwise unresolved nodes."),
       penRasters: z.array(z.object({ id: z.string().min(1), path: z.string().refine(isAbsolute), scale: z.number().positive().max(4).optional(), bounds: z.object({ id: z.string().min(1), x: z.number(), y: z.number(), width: z.number().nonnegative(), height: z.number().nonnegative() }).optional() })).optional().describe("Pen mode only: exact PNGs exported by the Pen engine for compound shapes, unusual fonts or unsupported paints. bounds may include outside strokes/effects; scale defaults to 1."),
@@ -58,7 +68,11 @@ export function createMCPServer(exporter: Exporter): McpServer {
     const { responseMode, ...exportOptions } = args;
     const penOnly = exportOptions.penPath || exportOptions.nodeIds || exportOptions.penBounds || exportOptions.penRasters;
     if ((args.mode ?? "figma") !== "pen" && penOnly) throw new Error("penPath/nodeIds/penBounds/penRasters require mode=pen");
-    if (args.mode === "pen" && !args.penPath) throw new Error("mode=pen requires penPath");
+    if (args.mode === "pen") {
+      exportOptions.penPath = localPath(args.penPath);
+      if (!exportOptions.penPath) throw new Error("mode=pen requires penPath");
+      if (!isAbsolute(exportOptions.penPath)) throw new Error("Pen mode requires an absolute .pen path or a ~/... path");
+    }
     return exporter.export(extra.signal, exportOptions).then(data => responseMode === "full" ? data : summarizeExport(data));
   }));
   const assessmentItemSchema = z.object({
@@ -77,7 +91,7 @@ export function createMCPServer(exporter: Exporter): McpServer {
     },
   }, async (args) => result(() => assessPreview(args.designPath, args.assessment)));
   server.registerTool("figma_validate_layout", {
-    description: "Two-stage validation. Baseline is rejected unless figma_assess_preview was completed and its previewAssessmentPath is supplied; this enforces using the deterministic preview as the implementation base. After baseline success, refine normal document flow and remeasure for phase=flow with baselineReportPath. Only workflowComplete=true completes automated stages. Actual data must come from the exported collector, not estimates.",
+    description: "Two-stage validation. Baseline requires the figma_assess_preview receipt. After baseline, refine normal document flow and remeasure phase=flow with baselineReportPath. CSS Grid is globally forbidden on design nodes and anonymous structural wrappers; display:grid/inline-grid always fail flow. Only workflowComplete=true completes automated stages. Measurements must come from the exported collector.",
     inputSchema: {
       designPath: z.string().refine(isAbsolute),
       mode: z.enum(["figma", "pen"]).optional().describe("Optional source assertion. When supplied it must match design.json meta.sourceMode."),

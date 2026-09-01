@@ -63,6 +63,40 @@ test("sync and async serializers agree and missing visibility properties are ret
   assert.equal(await fixture.context.serializeNodeAsync(node("hidden", { visible: false })), null);
 });
 
+test("transparent empty Frame and Group trees are pruned without dropping painted or visible-content containers", async () => {
+  const fixture = pluginFixture([node("root", { fills: [{ type: "SOLID", color: { r: 1, g: 1, b: 1 } }], children: [
+    node("independent-red-dot", { type: "FRAME", fills: [{ type: "SOLID", visible: false, color: { r: 1, g: 0, b: 0 } }], strokes: [], children: [] }),
+    node("transparent-group", { type: "GROUP", children: [node("hidden-dot", { opacity: 0, fills: [{ type: "SOLID", color: { r: 1, g: 0, b: 0 } }] })] }),
+    node("painted-frame", { fills: [{ type: "SOLID", color: { r: 1, g: 1, b: 1 } }], children: [node("painted-hidden-child", { opacity: 0 })] }),
+    node("content-frame", { fills: [{ type: "SOLID", visible: false, color: { r: 1, g: 1, b: 1 } }], children: [node("visible-label", { type: "TEXT", characters: "Keep" })] }),
+    node("effect-frame", { effects: [{ type: "DROP_SHADOW", visible: true, color: { r: 0, g: 0, b: 0, a: 0.2 } }], children: [] }),
+  ] })]);
+  const result = await fixture.request("transparent-containers");
+  assert.equal(result.type, "done");
+  assert.deepEqual(result.data.nodes[0].children.map((n) => n.id), ["painted-frame", "content-frame", "effect-frame"]);
+  assert.equal(fixture.context.shouldExportNode(node("empty-frame", { type: "FRAME", fills: [], strokes: [], children: [] })), false);
+  assert.equal(fixture.context.shouldExportNode(node("visible-shape", { type: "RECTANGLE", fills: [] })), true);
+});
+
+test("invisible paints and effects are dropped from serialized properties instead of kept as visible:false", async () => {
+  const result = await pluginFixture([node("root", { children: [
+    node("mixed-fills", { fills: [
+      { type: "SOLID", color: { r: 1, g: 0, b: 0 }, visible: false },
+      { type: "SOLID", color: { r: 0, g: 1, b: 0 }, opacity: 0 },
+      { type: "SOLID", color: { r: 0, g: 0, b: 1 } },
+    ], children: [node("label", { type: "TEXT", characters: "Keep" })] }),
+    node("invisible-effects", { effects: [
+      { type: "DROP_SHADOW", visible: false, color: { r: 0, g: 0, b: 0, a: 0.2 } },
+      { type: "INNER_SHADOW", color: { r: 0, g: 0, b: 0, a: 0 } },
+    ], children: [node("label-two", { type: "TEXT", characters: "Keep" })] }),
+  ] })]).request("filter-invisible-props");
+  assert.equal(result.type, "done");
+  const [mixed, effects] = result.data.nodes[0].children;
+  assert.equal(mixed.fills.length, 1);
+  assert.equal(mixed.fills[0].color, "rgba(0,0,255,1)");
+  assert.equal(effects.effects, undefined);
+});
+
 test("absolute edges retain fractional precision and account for a rotated transform", async () => {
   const fixture = pluginFixture([node("root", { absoluteBoundingBox: { x: -10.25, y: 40.75, width: 100.5, height: 200.25 }, children: [
     node("rotated", { width: 10.5, height: 20.25, absoluteTransform: [[0, -1, 20], [1, 0, 60]] }),
@@ -162,7 +196,7 @@ test("image paint leaves export both original bytes and rendered crop; container
     node("hidden-paint", { fills: [{ ...paint, visible: false }] }),
   ]).request("images", { shapeGroupsAsImages: false });
   assert.equal(result.type, "done");
-  const [leaf, container, hidden] = result.data.nodes;
+  const [leaf, container] = result.data.nodes;
   assert.equal(leaf.renderAs, "image");
   assert.deepEqual(leaf.fills[0].imageTransform, paint.imageTransform);
   assert.deepEqual(leaf.fills[0].filters, paint.filters);
@@ -170,7 +204,7 @@ test("image paint leaves export both original bytes and rendered crop; container
   assert.equal(result.data.assets.photo.kind, "image-fill");
   assert.equal(container.renderAs, undefined);
   assert.equal(container.children.length, 1);
-  assert.equal(hidden.renderAs, undefined);
+  assert.deepEqual(result.data.nodes.map((n) => n.id), ["leaf", "container"]);
 });
 
 test("rendering properties retain clipping, zero/false values, strokes, masks and layout semantics", async () => {

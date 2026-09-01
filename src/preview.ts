@@ -1,16 +1,19 @@
 import { flattenLayers, prepareDesign, type Design, type Layer, type Rect } from "./geometry.js";
 import { semanticPlan } from "./semantics.js";
 
-type PreviewPrimitive = "block-flow" | "inline-flow" | "flex-row" | "flex-column" | "grid" | "grid-overlay";
-type PreviewRole = "background" | "content" | "decoration";
+type PreviewPrimitive = "block-flow" | "inline-flow" | "flex-row" | "flex-column" | "layered-flow";
+type PreviewRole = "background" | "content" | "decoration" | "overlay";
 
 interface ContainerDecision {
   id: string;
   primitive: PreviewPrimitive;
+  contentFlow: Exclude<PreviewPrimitive, "layered-flow">;
   source: "semantic-plan" | "single-child-default" | "empty";
   childOrder: string[];
   backgroundIds: string[];
-  fallback: "grid-overlay";
+  overlayIds: string[];
+  contentRows: string[][];
+  fallback: "layered-flow";
 }
 
 interface PlacementDecision {
@@ -19,6 +22,8 @@ interface PlacementDecision {
   role: PreviewRole;
   alignment: "left" | "center" | "right" | "free";
 }
+
+type RenderUnit = { kind: "single"; layer: Layer } | { kind: "row"; layers: Layer[]; className: string };
 
 export interface PreviewBundle {
   html: string;
@@ -62,9 +67,74 @@ function backgroundIds(parent: Layer, ordered: Layer[]): string[] {
   const area = Math.max(1, parent.absoluteBounds.width * parent.absoluteBounds.height);
   return ordered.filter((child, index) => {
     const coverage = child.absoluteBounds.width * child.absoluteBounds.height / area;
+    const widthCoverage = child.absoluteBounds.width / Math.max(1, parent.absoluteBounds.width);
+    const topAnchored = Math.abs(child.localBounds.y) <= Math.max(1, parent.absoluteBounds.height * 0.005);
+    const sectionalBackdrop = widthCoverage >= 0.85 && topAnchored;
     const overlapsLaterContent = ordered.slice(index + 1).some(other => overlapArea(child.absoluteBounds, other.absoluteBounds) > 1);
-    return index < Math.max(1, Math.ceil(ordered.length / 2)) && coverage >= 0.85 && overlapsLaterContent && isVisualLayer(child) && !hasMeaningfulText(child);
+    return index < Math.max(1, Math.ceil(ordered.length / 2)) && (coverage >= 0.85 || sectionalBackdrop) && overlapsLaterContent && isVisualLayer(child) && !hasMeaningfulText(child);
   }).map(child => child.id);
+}
+
+function overlayIds(parent: Layer, ordered: Layer[], backgrounds: string[]): string[] {
+  const width = Math.max(1, parent.absoluteBounds.width), height = Math.max(1, parent.absoluteBounds.height), area = width * height;
+  const bottomTolerance = Math.max(1, height * 0.01);
+  return ordered.filter((child, index) => {
+    if (backgrounds.includes(child.id) || child.layoutPositioning === "ABSOLUTE" || child.renderAs === "image") return false;
+    const anchoredToBottom = Math.abs(height - child.localBounds.bottom) <= bottomTolerance;
+    const broad = child.absoluteBounds.width / width >= 0.85;
+    const overlapsEarlierContent = ordered.slice(0, index).some(other => !backgrounds.includes(other.id) && overlapArea(child.absoluteBounds, other.absoluteBounds) > 1);
+    const childArea = child.absoluteBounds.width * child.absoluteBounds.height;
+    const overlaysLargeSibling = childArea / area <= 0.5 && ordered.slice(0, index).some(other => {
+      if (backgrounds.includes(other.id)) return false;
+      const otherArea = other.absoluteBounds.width * other.absoluteBounds.height;
+      return otherArea / area >= 0.7 && overlapArea(child.absoluteBounds, other.absoluteBounds) >= childArea * 0.5;
+    });
+    return anchoredToBottom && broad && child.localBounds.y >= height * 0.5 && overlapsEarlierContent || overlaysLargeSibling;
+  }).map(child => child.id);
+}
+
+// Group non-overlapping content into rows by vertical midline, then order each
+// row left-to-right by horizontal midline. This preserves a 2D arrangement as
+// stacked rows of inline content instead of flattening every item into a single
+// wrapping flex line (which shifts items onto the wrong row and misaligns them).
+const midX = (layer: Layer) => layer.localBounds.x + layer.localBounds.width / 2;
+const midY = (layer: Layer) => layer.localBounds.y + layer.localBounds.height / 2;
+
+function rowTolerance(a: Layer, b: Layer): number {
+  return Math.max(2, Math.min(a.localBounds.height, b.localBounds.height) * 0.5);
+}
+
+function groupRows(children: Layer[]): Layer[][] {
+  if (!children.length) return [];
+  const sorted = [...children].sort((a, b) => midY(a) - midY(b) || midX(a) - midX(b));
+  const rows: Layer[][] = [];
+  for (const child of sorted) {
+    const last = rows[rows.length - 1];
+    const anchor = last?.[last.length - 1];
+    if (anchor && Math.abs(midY(child) - midY(anchor)) <= rowTolerance(anchor, child)) last.push(child);
+    else rows.push([child]);
+  }
+  return rows.map(row => [...row].sort((a, b) => midX(a) - midX(b) || midY(a) - midY(b)));
+}
+
+const rowTop = (row: Layer[]): number => Math.min(...row.map(child => child.localBounds.y));
+const rowBottom = (row: Layer[]): number => Math.max(...row.map(child => child.localBounds.y + child.localBounds.height));
+
+// True when any two content children overlap. Overlapping content cannot be
+// expressed as document flow (inline/block would drop the overlap and stack or
+// spread the items); it must keep its exported coordinates as an absolute layout.
+function contentOverlaps(children: Layer[]): boolean {
+  return children.some((child, index) => children.slice(index + 1).some(other => overlapArea(child.localBounds, other.localBounds) > 0.5));
+}
+
+// A single horizontal row maps to inline flow; a single vertical column maps to
+// block flow; multiple rows with multiple columns map to a wrapping row layout.
+function contentFlow(children: Layer[]): Exclude<PreviewPrimitive, "layered-flow"> {
+  if (children.length <= 1) return "block-flow";
+  const rows = groupRows(children);
+  if (rows.length === 1) return "inline-flow";
+  if (rows.every(row => row.length === 1)) return "block-flow";
+  return "flex-row";
 }
 
 function alignment(child: Layer, parent: Layer): PlacementDecision["alignment"] {
@@ -79,22 +149,45 @@ function alignment(child: Layer, parent: Layer): PlacementDecision["alignment"] 
   return winner[1] <= tolerance ? winner[0] : "free";
 }
 
-function placementCSS(node: Layer, parent: Layer | null, parentPrimitive: PreviewPrimitive | null, previous: Layer | null, align: PlacementDecision["alignment"]): string[] {
-  if (!parent || !parentPrimitive) return [];
+interface Placement {
+  primitive: PreviewPrimitive | null;
+  role: PreviewRole;
+  align: PlacementDecision["alignment"];
+  previous: Layer | null;
+  rowTop: number;
+  inRow: boolean;
+  absolute: boolean;
+  rotation: number;
+}
+
+// A rotated layer's exported absoluteBounds is its axis-aligned bounding box, which
+// is wider/taller than its unrotated width/height. Position the element by its
+// center so `rotate` (around the default center origin) lands the box correctly.
+function placementCSS(node: Layer, parent: Layer | null, placement: Placement): string[] {
+  if (!parent || !placement.primitive) return [];
   const box = node.localBounds;
-  if (parentPrimitive === "grid" || parentPrimitive === "grid-overlay") {
-    return ["grid-area:1 / 1", `margin-left:${px(box.x)}`, `margin-top:${px(box.y)}`, "align-self:start", "justify-self:start"];
+  const nodeWidth = typeof node.width === "number" ? node.width : null;
+  const nodeHeight = typeof node.height === "number" ? node.height : null;
+  const rotated = placement.rotation !== 0 && nodeWidth !== null && nodeHeight !== null;
+  if (placement.absolute || (placement.primitive === "layered-flow" && (placement.role !== "content" || node.layoutPositioning === "ABSOLUTE"))) {
+    const left = rotated ? box.x + (box.width - nodeWidth!) / 2 : box.x;
+    const top = rotated ? box.y + (box.height - nodeHeight!) / 2 : box.y;
+    return ["position:absolute", `left:${px(left)}`, `top:${px(top)}`];
   }
-  if (parentPrimitive === "inline-flow" || parentPrimitive === "flex-row") {
-    const previousRight = previous ? previous.localBounds.x + previous.localBounds.width : 0;
-    return [parentPrimitive === "inline-flow" ? "display:inline-block" : "flex:none", `margin-left:${px(Math.max(0, box.x - previousRight))}`, `margin-top:${px(Math.max(0, box.y))}`, "vertical-align:top"];
+  if (placement.inRow) {
+    const previousRight = placement.previous ? placement.previous.localBounds.x + placement.previous.localBounds.width : 0;
+    return ["display:inline-block", `margin-left:${px(Math.max(0, box.x - previousRight))}`, `margin-top:${px(Math.max(0, box.y - placement.rowTop))}`, "vertical-align:top"];
   }
-  const previousBottom = previous ? previous.localBounds.y + previous.localBounds.height : 0;
+  if (placement.primitive === "inline-flow" || placement.primitive === "flex-row") {
+    const previousRight = placement.previous ? placement.previous.localBounds.x + placement.previous.localBounds.width : 0;
+    return [placement.primitive === "inline-flow" ? "display:inline-block" : "flex:none", `margin-left:${px(Math.max(0, box.x - previousRight))}`, `margin-top:${px(Math.max(0, box.y))}`, "vertical-align:top"];
+  }
+  const previousBottom = placement.previous ? placement.previous.localBounds.y + placement.previous.localBounds.height : 0;
   const rules = [`margin-top:${px(Math.max(0, box.y - previousBottom))}`];
-  if (align === "center") rules.push("margin-left:auto", "margin-right:auto");
-  else if (align === "right") rules.push("margin-left:auto");
+  if (placement.align === "center") rules.push("margin-left:auto", "margin-right:auto");
+  else if (placement.align === "right") rules.push("margin-left:auto");
   else if (box.x > 0) rules.push(`margin-left:${px(box.x)}`);
-  if (parentPrimitive === "flex-column") rules.push("flex:none");
+  if (placement.primitive === "flex-column") rules.push("flex:none");
   return rules;
 }
 
@@ -128,6 +221,9 @@ function paintCSS(node: Layer, design: Design): string[] {
   if (radii && [radii.topLeft, radii.topRight, radii.bottomRight, radii.bottomLeft].every(value => typeof value === "number")) {
     rules.push(`border-radius:${px(radii.topLeft)} ${px(radii.topRight)} ${px(radii.bottomRight)} ${px(radii.bottomLeft)}`);
   } else if (typeof node.cornerRadius === "number" && node.cornerRadius > 0) rules.push(`border-radius:${px(node.cornerRadius)}`);
+  // A Figma ELLIPSE carries no cornerRadius; its full inscribed oval is expressed
+  // by a 50% radius on both axes (a circle for a square box, an oval otherwise).
+  else if (node.type === "ELLIPSE") rules.push("border-radius:50%");
   if (node.clipsContent) rules.push("overflow:hidden");
   if (typeof node.opacity === "number" && node.opacity !== 1) rules.push(`opacity:${node.opacity}`);
   if (typeof node.rotation === "number" && node.rotation !== 0) rules.push(`rotate:${node.rotation}deg`);
@@ -178,7 +274,16 @@ export function generatePreview(input: unknown): PreviewBundle {
   const placementDecisions: PlacementDecision[] = [];
   const roleById = new Map<string, PreviewRole>();
   const primitiveById = new Map<string, PreviewPrimitive>();
+  const contentFlowById = new Map<string, Exclude<PreviewPrimitive, "layered-flow">>();
   const orderedById = new Map<string, Layer[]>();
+  const multiRowById = new Map<string, boolean>();
+  const contentAbsoluteById = new Map<string, boolean>();
+  const renderUnitsById = new Map<string, RenderUnit[]>();
+  const rowTopById = new Map<string, number>();
+  const prevInRowById = new Map<string, Layer | null>();
+  const inRowById = new Map<string, boolean>();
+  const rowMarginByClass = new Map<string, number>();
+  let rowClassCounter = 0;
 
   for (const parent of layers) {
     const children = parent.children ?? [];
@@ -187,22 +292,92 @@ export function generatePreview(input: unknown): PreviewBundle {
     const byId = new Map(children.map(child => [child.id, child]));
     const ordered = order ? [...order.map(id => byId.get(id)).filter((node): node is Layer => Boolean(node)), ...children.filter(child => !order.includes(child.id))] : children;
     const backgrounds = backgroundIds(parent, ordered);
-    const primitive = strategyById.get(parent.id) ?? (children.length === 1 ? "block-flow" : "grid-overlay");
+    const overlays = overlayIds(parent, ordered, backgrounds);
+    const primitive = strategyById.get(parent.id) ?? (children.length === 1 ? "block-flow" : "layered-flow");
+    for (const child of ordered) {
+      const atomicPaintLayer = primitive === "layered-flow" && child.renderAs === "image";
+      const smallVisualLayer = primitive === "layered-flow" && isVisualLayer(child) && !hasMeaningfulText(child) && child.absoluteBounds.width * child.absoluteBounds.height < parent.absoluteBounds.width * parent.absoluteBounds.height * 0.25;
+      roleById.set(child.id, backgrounds.includes(child.id) ? "background" : overlays.includes(child.id) ? "overlay" : atomicPaintLayer || smallVisualLayer ? "decoration" : "content");
+    }
+    const flowChildren = ordered.filter(child => (roleById.get(child.id) ?? "content") === "content" && child.layoutPositioning !== "ABSOLUTE");
+    const rows = groupRows(flowChildren);
+    const flow = contentFlow(flowChildren);
+    const multiRow = rows.length > 1 && rows.some(row => row.length > 1);
+    const contentAbsolute = contentOverlaps(flowChildren);
+    const previewOrder = primitive === "layered-flow" && !contentAbsolute
+      ? [...ordered.filter(child => (roleById.get(child.id) ?? "content") === "background"), ...rows.flat(), ...ordered.filter(child => !["background", "content"].includes(roleById.get(child.id) ?? "content") || child.layoutPositioning === "ABSOLUTE")]
+      : ordered;
+
+    // Multi-row content is wrapped in inline row boxes so the browser stacks rows
+    // vertically instead of flattening them into one long, wrapping line. When the
+    // rows overlap, no document flow can reproduce their positions, so every child
+    // keeps its exported coordinates as an absolute layout.
+    let units: RenderUnit[];
+    if (multiRow && !contentAbsolute) {
+      const backgroundUnits = ordered.filter(child => roleById.get(child.id) === "background").map(child => ({ kind: "single" as const, layer: child }));
+      const overlayUnits = ordered.filter(child => {
+        const role = roleById.get(child.id) ?? "content";
+        return role !== "background" && (role !== "content" || child.layoutPositioning === "ABSOLUTE");
+      }).map(child => ({ kind: "single" as const, layer: child }));
+      const rowUnits = rows.map((row, rowIndex) => {
+        const className = `d2c-row-${++rowClassCounter}`;
+        const top = rowTop(row);
+        rowMarginByClass.set(className, Math.max(0, top - (rowIndex === 0 ? 0 : rowBottom(rows[rowIndex - 1]))));
+        for (let index = 0; index < row.length; index++) {
+          const child = row[index];
+          rowTopById.set(child.id, top);
+          prevInRowById.set(child.id, index > 0 ? row[index - 1] : null);
+          inRowById.set(child.id, true);
+        }
+        return { kind: "row" as const, layers: row, className };
+      });
+      units = [...backgroundUnits, ...rowUnits, ...overlayUnits];
+    } else {
+      units = previewOrder.map(child => ({ kind: "single" as const, layer: child }));
+    }
+
     primitiveById.set(parent.id, primitive);
-    orderedById.set(parent.id, ordered);
-    for (const child of ordered) roleById.set(child.id, backgrounds.includes(child.id) ? "background" : isVisualLayer(child) && !hasMeaningfulText(child) && child.absoluteBounds.width * child.absoluteBounds.height < parent.absoluteBounds.width * parent.absoluteBounds.height * 0.25 ? "decoration" : "content");
-    containerDecisions.push({ id: parent.id, primitive, source: strategyById.has(parent.id) ? "semantic-plan" : "single-child-default", childOrder: ordered.map(child => child.id), backgroundIds: backgrounds, fallback: "grid-overlay" });
+    contentFlowById.set(parent.id, flow);
+    orderedById.set(parent.id, previewOrder);
+    multiRowById.set(parent.id, multiRow);
+    contentAbsoluteById.set(parent.id, contentAbsolute);
+    renderUnitsById.set(parent.id, units);
+    containerDecisions.push({ id: parent.id, primitive, contentFlow: flow, source: strategyById.has(parent.id) ? "semantic-plan" : "single-child-default", childOrder: previewOrder.map(child => child.id), backgroundIds: backgrounds, overlayIds: overlays, contentRows: rows.map(row => row.map(child => child.id)), fallback: "layered-flow" });
   }
 
   const cssRules: string[] = [];
+  for (const [className, margin] of rowMarginByClass) cssRules.push(`.${className} { display:block; font-size:0; white-space:nowrap; margin-top:${px(margin)}; }`);
+
   for (const node of layers) {
     const parent = node.parentId ? layers.find(candidate => candidate.id === node.parentId) ?? null : null;
     const parentPrimitive = parent ? primitiveById.get(parent.id) ?? null : null;
-    const siblings = parent ? orderedById.get(parent.id) ?? [] : [];
-    const index = siblings.findIndex(sibling => sibling.id === node.id);
+    const role = roleById.get(node.id) ?? "content";
     const align = parent ? alignment(node, parent) : "left";
-    placementDecisions.push({ id: node.id, parentId: node.parentId, role: roleById.get(node.id) ?? "content", alignment: align });
-    const rules = [`width:${px(node.absoluteBounds.width)}`, `height:${px(node.absoluteBounds.height)}`, ...placementCSS(node, parent, parentPrimitive, index > 0 ? siblings[index - 1] : null, align), ...paintCSS(node, design), ...textCSS(node)];
+    placementDecisions.push({ id: node.id, parentId: node.parentId, role, alignment: align });
+
+    let effectivePrimitive: PreviewPrimitive | null = parentPrimitive;
+    let previous: Layer | null = null;
+    let rowTopValue = 0;
+    const inRow = inRowById.get(node.id) ?? false;
+    if (inRow) {
+      previous = prevInRowById.get(node.id) ?? null;
+      rowTopValue = rowTopById.get(node.id) ?? 0;
+    } else {
+      if (parentPrimitive === "layered-flow" && role === "content" && node.layoutPositioning !== "ABSOLUTE") {
+        effectivePrimitive = contentFlowById.get(parent!.id) ?? "block-flow";
+      }
+      const siblings = parent ? orderedById.get(parent.id) ?? [] : [];
+      const index = siblings.findIndex(sibling => sibling.id === node.id);
+      previous = index > 0 ? [...siblings.slice(0, index)].reverse().find(sibling => parentPrimitive !== "layered-flow" || (roleById.get(sibling.id) ?? "content") === "content" && sibling.layoutPositioning !== "ABSOLUTE") ?? null : null;
+    }
+
+    const absolute = contentAbsoluteById.get(parent?.id ?? "") ?? false;
+    const rotation = typeof node.rotation === "number" && node.renderAs !== "image" ? node.rotation : 0;
+    const rotatedSize = rotation !== 0 && typeof node.width === "number" && typeof node.height === "number" ? { width: node.width, height: node.height } : null;
+    const nodeWidth = rotatedSize ? rotatedSize.width : node.absoluteBounds.width;
+    const nodeHeight = rotatedSize ? rotatedSize.height : node.absoluteBounds.height;
+    const placement: Placement = { primitive: effectivePrimitive, role, align, previous, rowTop: rowTopValue, inRow, absolute, rotation };
+    const rules = [`width:${px(nodeWidth)}`, `height:${px(nodeHeight)}`, ...placementCSS(node, parent, placement), ...paintCSS(node, design), ...textCSS(node)];
     cssRules.push(`.${classById.get(node.id)} { ${rules.join("; ")}; }`);
     if (Array.isArray(node.styledTextSegments)) node.styledTextSegments.forEach((segment, segmentIndex) => {
       const style = record(segment);
@@ -214,19 +389,24 @@ export function generatePreview(input: unknown): PreviewBundle {
     }
     const primitive = primitiveById.get(node.id);
     if (primitive) {
-      const display = primitive === "grid" || primitive === "grid-overlay" ? "grid" : primitive === "flex-row" || primitive === "flex-column" ? "flex" : primitive === "inline-flow" ? "block" : "flow-root";
-      const extras = primitive === "flex-row" ? "flex-direction:row" : primitive === "flex-column" ? "flex-direction:column" : primitive === "inline-flow" ? "font-size:0;white-space:nowrap" : "";
-      cssRules.push(`.${classById.get(node.id)} > .d2c-children { display:${display}; ${extras}; width:100%; height:100%; }`);
+      const multiRow = multiRowById.get(node.id) ?? false;
+      const renderedPrimitive = multiRow ? "block-flow" : (primitive === "layered-flow" ? contentFlowById.get(node.id) ?? "block-flow" : primitive);
+      const display = renderedPrimitive === "flex-row" || renderedPrimitive === "flex-column" ? "flex" : renderedPrimitive === "inline-flow" ? "block" : "flow-root";
+      const extras = [
+        renderedPrimitive === "flex-row" ? "flex-direction:row;flex-wrap:wrap" : renderedPrimitive === "flex-column" ? "flex-direction:column" : renderedPrimitive === "inline-flow" ? "font-size:0;white-space:nowrap" : "",
+        primitive === "layered-flow" ? "position:relative" : "",
+      ].filter(Boolean).join(";");
+      cssRules.push(`.${classById.get(node.id)} > .d2c-children { display:${display}; ${extras ? `${extras}; ` : ""}width:100%; height:100%; }`);
     }
   }
 
   const render = (node: Layer, root = false): string => {
-    const children = orderedById.get(node.id) ?? node.children ?? [];
+    const units = renderUnitsById.get(node.id);
     const textSegments = Array.isArray(node.styledTextSegments) ? node.styledTextSegments.map(record).filter((segment): segment is Record<string, unknown> => Boolean(segment)) : [];
     const body = node.renderAs === "image" ? imageMarkup(node, design)
       : node.type === "TEXT" && textSegments.length ? textSegments.map((segment, segmentIndex) => `<span class="d2c-text-segment ${classById.get(node.id)}-text-${segmentIndex + 1}" data-d2c-text-start="${esc(segment.start)}" data-d2c-text-end="${esc(segment.end)}">${esc(segment.characters)}</span>`).join("")
       : node.type === "TEXT" ? esc(node.characters)
-      : children.length ? `<div class="d2c-children">${children.map(child => render(child)).join("")}</div>` : "";
+      : units && units.length ? `<div class="d2c-children">${units.map(unit => unit.kind === "row" ? `<div class="d2c-row ${unit.className}">${unit.layers.map(child => render(child)).join("")}</div>` : render(unit.layer)).join("")}</div>` : "";
     const repeat = semantics.repeatGroups.find(group => group.instanceIds.includes(node.id));
     const attributes = [
       `class="d2c-node ${classById.get(node.id)}"`, `data-d2c-id="${esc(node.id)}"`, `data-layer-name="${esc(node.name)}"`,
@@ -240,6 +420,7 @@ export function generatePreview(input: unknown): PreviewBundle {
     const reasons: string[] = [];
     if (layer.isMask) reasons.push("mask relationship uses the default preserved hierarchy");
     if (layer.renderAs !== "image" && typeof layer.rotation === "number" && layer.rotation !== 0) reasons.push("rotated layer uses a CSS rotate fallback");
+    if (primitiveById.get(layer.id) === "layered-flow") reasons.push("overlapping container uses a no-Grid layered-flow fallback; keep content in flow and review positioned paint layers");
     if (layer.type === "EMBED" || layer.type === "WIDGET") reasons.push(`${layer.type.toLowerCase()} uses a generic container fallback`);
     return reasons.map(reason => ({ id: layer.id, reason }));
   });

@@ -86,9 +86,46 @@ function readProp(node, prop, fallback) {
   }
 }
 
-// Prune invisible subtrees before serializing or collecting image resources.
+function paintIsVisible(paint) {
+  if (!paint || paint.visible === false || paint.opacity === 0) return false;
+  return !(paint.type === "SOLID" && paint.color && paint.color.a === 0);
+}
+
+function hasVisiblePaint(node, prop) {
+  var paints = readProp(node, prop, null);
+  if (!paints || isMixed(paints)) return Boolean(paints);
+  for (var i = 0; i < paints.length; i++) if (paintIsVisible(paints[i])) return true;
+  return false;
+}
+
+function hasVisibleEffect(node) {
+  var effects = readProp(node, "effects", null);
+  if (!effects || isMixed(effects)) return Boolean(effects);
+  for (var i = 0; i < effects.length; i++) {
+    var effect = effects[i];
+    if (effect && effect.visible !== false && !(effect.color && effect.color.a === 0)) return true;
+  }
+  return false;
+}
+
+// Empty Frame/Group wrappers with no visible paint and no exportable descendants
+// do not contribute pixels. Prune them together with explicitly hidden subtrees.
+function isVisuallyEmptyContainer(node) {
+  var type = readProp(node, "type", "UNKNOWN");
+  if (type !== "FRAME" && type !== "GROUP") return false;
+  // Real FrameNodes expose paint properties. Preserve partial/proxy nodes whose
+  // appearance cannot be determined instead of treating missing data as empty.
+  if (type === "FRAME" && !hasProp(node, "fills") && !hasProp(node, "strokes")) return false;
+  if (readProp(node, "isMask", false) || hasVisiblePaint(node, "fills") || hasVisiblePaint(node, "strokes") || hasVisibleEffect(node)) return false;
+  var children = readProp(node, "children", []);
+  if (type === "GROUP" && children.length === 0) return false;
+  for (var i = 0; i < children.length; i++) if (shouldExportNode(children[i])) return false;
+  return true;
+}
+
+// Prune invisible or pixel-empty subtrees before serializing or collecting images.
 function shouldExportNode(node) {
-  return readProp(node, "visible", true) !== false && readProp(node, "opacity", 1) !== 0;
+  return readProp(node, "visible", true) !== false && readProp(node, "opacity", 1) !== 0 && !isVisuallyEmptyContainer(node);
 }
 
 // A directly selected child can still be hidden by an ancestor outside selection.
@@ -431,8 +468,12 @@ function serializePaintList(node, prop) {
   var paints = readProp(node, prop, null);
   if (!paints || isMixed(paints)) return null;
 
+  // Invisible paints are treated as though the property does not exist:
+  // keep the property list clean instead of emitting `visible:false` entries.
   var result = [];
-  for (var i = 0; i < paints.length; i++) result.push(serializePaint(paints[i]));
+  for (var i = 0; i < paints.length; i++) {
+    if (paintIsVisible(paints[i])) result.push(serializePaint(paints[i]));
+  }
   return result;
 }
 
@@ -497,9 +538,14 @@ function serializeNodeBase(node) {
   }
 
   var effects = readProp(node, "effects", null);
-  if (effects && !isMixed(effects) && effects.length > 0) {
-    base.effects = [];
-    for (var i = 0; i < effects.length; i++) base.effects.push(serializeEffect(effects[i]));
+  if (effects && !isMixed(effects)) {
+    // Invisible effects are treated as though the property does not exist.
+    var visibleEffects = [];
+    for (var i = 0; i < effects.length; i++) {
+      var effect = effects[i];
+      if (effect && effect.visible !== false && !(effect.color && effect.color.a === 0)) visibleEffects.push(serializeEffect(effect));
+    }
+    if (visibleEffects.length) base.effects = visibleEffects;
   }
 
   var constraints = serializeConstraints(readProp(node, "constraints", null));
