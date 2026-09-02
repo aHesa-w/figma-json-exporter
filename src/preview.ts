@@ -120,6 +120,11 @@ function groupRows(children: Layer[]): Layer[][] {
 const rowTop = (row: Layer[]): number => Math.min(...row.map(child => child.localBounds.y));
 const rowBottom = (row: Layer[]): number => Math.max(...row.map(child => child.localBounds.y + child.localBounds.height));
 
+// Rough visual reading order for the DOM: top-to-bottom, then left-to-right by
+// positioning midline. Stacking stays correct via z-index (paint order), so the
+// source order can follow reading order.
+const visualSort = (children: Layer[]): Layer[] => [...children].sort((a, b) => midY(a) - midY(b) || midX(a) - midX(b));
+
 // True when any two content children overlap. Overlapping content cannot be
 // expressed as document flow (inline/block would drop the overlap and stack or
 // spread the items); it must keep its exported coordinates as an absolute layout.
@@ -306,8 +311,12 @@ export function generatePreview(input: unknown): PreviewBundle {
     const flow = contentFlow(flowChildren);
     const multiRow = rows.length > 1 && rows.some(row => row.length > 1);
     const contentAbsolute = contentOverlaps(flowChildren);
-    const previewOrder = primitive === "layered-flow" && !contentAbsolute
-      ? [...ordered.filter(child => (roleById.get(child.id) ?? "content") === "background"), ...rows.flat(), ...ordered.filter(child => !["background", "content"].includes(roleById.get(child.id) ?? "content") || child.layoutPositioning === "ABSOLUTE")]
+    // The DOM follows a rough top-to-bottom, left-to-right reading order. Stacking
+    // is handled separately by z-index (paint order), so source order is free to be
+    // readable. Backgrounds lead, then content in visual order, then overlays and
+    // decorations in visual order.
+    const previewOrder = primitive === "layered-flow"
+      ? [...visualSort(ordered.filter(child => (roleById.get(child.id) ?? "content") === "background")), ...rows.flat(), ...visualSort(ordered.filter(child => !["background", "content"].includes(roleById.get(child.id) ?? "content") || child.layoutPositioning === "ABSOLUTE"))]
       : ordered;
 
     // Multi-row content is wrapped in inline row boxes so the browser stacks rows
@@ -316,11 +325,11 @@ export function generatePreview(input: unknown): PreviewBundle {
     // keeps its exported coordinates as an absolute layout.
     let units: RenderUnit[];
     if (multiRow && !contentAbsolute) {
-      const backgroundUnits = ordered.filter(child => roleById.get(child.id) === "background").map(child => ({ kind: "single" as const, layer: child }));
-      const overlayUnits = ordered.filter(child => {
+      const backgroundUnits = visualSort(ordered.filter(child => roleById.get(child.id) === "background")).map(child => ({ kind: "single" as const, layer: child }));
+      const overlayUnits = visualSort(ordered.filter(child => {
         const role = roleById.get(child.id) ?? "content";
         return role !== "background" && (role !== "content" || child.layoutPositioning === "ABSOLUTE");
-      }).map(child => ({ kind: "single" as const, layer: child }));
+      })).map(child => ({ kind: "single" as const, layer: child }));
       const rowUnits = rows.map((row, rowIndex) => {
         const className = `d2c-row-${++rowClassCounter}`;
         const top = rowTop(row);

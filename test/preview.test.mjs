@@ -211,6 +211,19 @@ test("layered siblings stack by design paint order, keeping backdrops behind con
   assert.match(rule("label"), /z-index:2/);
 });
 
+test("overlapping content DOM follows top-to-bottom reading order, not paint order", () => {
+  const card = (id, x, y) => ({ id, name: id, type: "FRAME", absoluteBounds: box(x, y, 60, 40), children: [text(`${id}-t`, id, x, y, id)] });
+  const preview = generatePreview({
+    meta: { schemaVersion: 3, exporterVersion: "3.5.0" }, assets: {},
+    nodes: [{ id: "over", name: "over", type: "GROUP", absoluteBounds: box(0, 0, 100, 100), children: [
+      card("bottom", 40, 20), card("middle", 20, 10), card("top", 0, 0),
+    ] }],
+  });
+  const container = preview.manifest.containers.find(item => item.id === "over");
+  // Design order is bottom->middle->top, but the DOM follows the visual midline.
+  assert.deepEqual(container.childOrder, ["top", "middle", "bottom"]);
+});
+
 test("overlapping content children keep exported coordinates instead of spreading inline", () => {
   // Three overlapping card instances in a single visual row. Inline flow would
   // spread them side by side; they must stay absolutely positioned on top of
