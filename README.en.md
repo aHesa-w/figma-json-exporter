@@ -10,7 +10,7 @@ Export the current Figma selection or a Pen `.pen` file as structured JSON, asse
 - Generate `design.json`, a semantic plan, an asset manifest and an HTML/CSS preview.
 - Create and optimize a copy of a Figma selection from a model-authored plan without changing the original.
 - Validate implementation geometry against browser-measured rectangles.
-- Export Pen `.pen` files without the Figma plugin.
+- Experimental export of Pen `.pen` files without the Figma plugin.
 
 ## Requirements
 
@@ -95,6 +95,8 @@ The optimizer removes invisible or fully ancestor-clipped nodes, establishes pag
 The original selection is untouched. Unsafe plans involving instance internals, masks, non-contiguous sibling groups or stale selections are rejected. One Undo removes the created copy.
 
 ## Pen mode
+
+> **Experimental:** Pen export is still incomplete and currently intended for validation and limited use cases. It does not yet guarantee full fidelity for every `.pen` node, layout, font, gradient or dynamic behavior. Prefer Figma mode for production workflows.
 
 Pen mode reads local `.pen` JSON directly and does not require the Figma plugin:
 
