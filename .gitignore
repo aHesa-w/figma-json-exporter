@@ -1,4 +1,5 @@
 figma-export-agent
 node_modules/
 dist/
+tmp-export/
 .DS_Store
