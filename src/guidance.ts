@@ -189,7 +189,7 @@ export const GUIDANCE: GuidanceEntry[] = [
   {
     tag: "image",
     title: "Raster / image layer",
-    guidance: "For renderAs=image keep the layer ID on a layout-sized wrapper with overflow visible and put an IMG marked data-d2c-asset=assetId at imagePlacement (including negative offsets). Preserve the original filename and the expanded canvas; never stretch it into the layout box or clip its outside strokes/shadows. Non-raster image paints render via assets[imageHash], not empty containers. Do not repeat baked text or effects.",
+    guidance: "For renderAs=image keep the layer ID on an imageBounds-sized wrapper positioned at the visual canvas origin with overflow visible, and put an equally sized IMG marked data-d2c-asset=assetId at 0/0. Preserve the original filename and expanded canvas; never stretch it into the layout box or clip its outside strokes/shadows. Local clipsContent is already baked into the atomic PNG; preserve ancestor clipping. Non-raster image paints render via assets[imageHash], not empty containers. Do not repeat baked text or effects.",
   },
   {
     tag: "gradient",
@@ -199,7 +199,7 @@ export const GUIDANCE: GuidanceEntry[] = [
   {
     tag: "text",
     title: "Text rendering",
-    guidance: "Use textColor.css for the text color, not background-color; its alpha already includes paint opacity but not node opacity. Use lineHeight.css when present: PERCENT stays %, AUTO must have a resolved px or be rasterized; never substitute fontSize or a guessed multiplier. Preserve fontSize, fontWeight, font style, text alignment and letterSpacing.css (percent is em, not px). Do not re-bake text or effects.",
+    guidance: "Use textColor.css for solid text color, not background-color; its alpha already includes paint opacity but not node opacity. For supported linear-gradient text, use gradient.css as a node-sized background with background-clip:text and transparent text fill so the text stays selectable. Use lineHeight.css when present: PERCENT stays %, AUTO must have a resolved px or be rasterized; never substitute fontSize or a guessed multiplier. Preserve fontSize, fontWeight, font style, text alignment and letterSpacing.css (percent is em, not px). Do not re-bake text or effects.",
   },
   {
     tag: "clipping",
@@ -209,7 +209,7 @@ export const GUIDANCE: GuidanceEntry[] = [
   {
     tag: "mask",
     title: "Masks",
-    guidance: "Respect masks and paint order; implement the mask with its affected siblings — overflow:hidden is not an alpha/luminance/vector mask.",
+    guidance: "Respect masks and paint order; implement the mask with its affected siblings — overflow:hidden is not an alpha/luminance/vector mask. A Figma mask source supplies alpha/luminance and is not independently painted in the composed result, so never expose its fill as a standalone color block.",
   },
   {
     tag: "paint",

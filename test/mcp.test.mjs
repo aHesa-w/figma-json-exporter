@@ -57,6 +57,8 @@ async function fixture(t) {
     const socket = new WebSocket(`ws://127.0.0.1:${port}/ws`);
     sockets.push(socket);
     await once(socket, "open");
+    socket.send(JSON.stringify({ type: "hello", pluginVersion: "3.5.0", features: ["export", "optimize-v1", "structure-font-fallback-v1", "layers-panel-order-v1", "clip-pruning-v1", "architecture-post-groups-v1", "root-architecture-floating-v1"] }));
+    await once(socket, "message");
     return socket;
   }
   return { base, entry, env, client, plugin };
@@ -69,9 +71,9 @@ test("standalone compiled entry auto-starts shared service; stdio and HTTP expos
   const f = await fixture(t);
   const stdio = await f.client();
   const http = await f.client("http");
-  assert.equal((await (await fetch(f.base + "/health")).json()).version, "3.12.1");
+  assert.equal((await (await fetch(f.base + "/health")).json()).version, "3.15.0");
   for (const client of [stdio, http]) {
-    assert.deepEqual((await client.listTools()).tools.map((tool) => tool.name).sort(), ["figma_assess_preview", "figma_export", "figma_guidance", "figma_status", "figma_validate_layout"]);
+    assert.deepEqual((await client.listTools()).tools.map((tool) => tool.name).sort(), ["figma_assess_preview", "figma_export", "figma_guidance", "figma_optimize_selection", "figma_status", "figma_validate_layout"]);
     assert.equal(payload(await client.callTool({ name: "figma_status", arguments: {} })).connected, false);
     assert.equal(payload(await client.callTool({ name: "figma_status", arguments: { mode: "figma", penPath: "~/ignored.pen" } })).connected, false);
     const relativePenStatus = await client.callTool({ name: "figma_status", arguments: { mode: "pen", penPath: "relative.pen" } });
@@ -89,8 +91,40 @@ test("standalone compiled entry auto-starts shared service; stdio and HTTP expos
     const error = await client.callTool({ name: "figma_export", arguments: {} });
     assert.equal(error.isError, true);
     assert.match(error.content[0].text, /not connected/);
+    const optimizeError = await client.callTool({ name: "figma_optimize_selection", arguments: { expectedSelectionIds: ["root"], plan: { summary: "Create a safe copied hierarchy and normalize its DOM-like reading order." } } });
+    assert.equal(optimizeError.isError, true);
+    assert.match(optimizeError.content[0].text, /not connected/);
   }
   assert.equal((await fetch(f.base + "/export")).status, 503);
+});
+
+test("MCP model plan creates a separate optimized Figma copy through the shared bridge", { timeout: 15000 }, async (t) => {
+  const f = await fixture(t);
+  const client = await f.client();
+  const socket = await f.plugin();
+  const root = node("root", { width: 240, height: 240, children: [
+    node("hidden", { visible: false }),
+    node("first", { x: 0, y: 20, width: 80, height: 40 }),
+    node("second", { x: 0, y: 100, width: 80, height: 40 }),
+  ] });
+  const plugin = pluginFixture([root]);
+  socket.on("message", async (raw) => {
+    const request = JSON.parse(raw.toString());
+    const response = request.type === "optimize"
+      ? await plugin.optimize(request.requestId, request.request)
+      : await plugin.request(request.requestId);
+    socket.send(JSON.stringify(response));
+  });
+  const optimized = payload(await client.callTool({ name: "figma_optimize_selection", arguments: {
+    expectedSelectionIds: ["root"], copyName: "DOM优化", spacing: 240,
+    plan: { summary: "Remove the hidden child and normalize the root children into top-to-bottom visual reading order.", removeInvisible: true, reorderParentIds: ["root"] },
+  } }));
+  assert.equal(optimized.status, "optimized");
+  assert.deepEqual(optimized.sourceRootIds, ["root"]);
+  assert.deepEqual(optimized.removedInvisibleSourceNodeIds, ["hidden"]);
+  assert.deepEqual(optimized.reorderedParentSourceIds, ["root"]);
+  assert.equal(optimized.optimizedRootIds.length, 1);
+  assert.equal(root.children.some(child => child.id === "hidden"), true);
 });
 
 test("MCP export round trip executes the real plugin filtering logic", { timeout: 15000 }, async (t) => {
@@ -362,7 +396,7 @@ test("MCP returns real local image paths only after bytes are written, and valid
   for (const asset of Object.values(saved.assets)) { await access(asset.path); assert.equal((await readFile(asset.path)).length, asset.byteLength); }
   const assessment = payload(await client.callTool({ name: "figma_assess_preview", arguments: { designPath: saved.meta.designPath, assessment: { summary: "The rendered preview preserves the complete layer hierarchy and needs a targeted icon alignment correction.", preserve: [{ description: "Keep the root hierarchy and clipping", nodeIds: ["root", "photo", "text"] }], gaps: [{ description: "Correct the icon alignment in its existing slot", nodeIds: ["icon"], action: "Adjust the icon container without rebuilding the page" }] } } }));
   const baselineGate = { previewAssessmentPath: assessment.previewAssessmentPath };
-  const measured = { sampleId: "mcp-baseline", collectedAt: new Date().toISOString(), viewport: { width: 1200, height: 900, devicePixelRatio: 1 }, collectorVersion: 5, coordinateSpace: "root-relative", stable: true, fontsReady: true, brokenImages: [], nodes: [saved.nodes[0], ...saved.nodes[0].children].map((n) => ({ id: n.id, rootId: n.rootId, parentId: n.parentId, visible: true, bounds: n.relativeBounds, tagName: n.assetId ? "IMG" : "DIV", imageSources: n.assetId ? [saved.assets[n.assetId].path] : [], textStyle: n.type === "TEXT" ? { fontSize: n.fontSize, lineHeight: n.lineHeight.pixels, fontWeight: n.fontWeight, fontStyle: "normal", letterSpacing: 0, textAlign: "left", direction: "ltr", textDecorationLine: "none", color: n.textColor.css, textFillColor: n.textColor.css } : undefined, assetImages: n.assetId ? [{ assetId: n.assetId, src: saved.assets[n.assetId].path, bounds: n.relativeImageBounds, naturalWidth: saved.assets[n.assetId].pixelWidth, naturalHeight: saved.assets[n.assetId].pixelHeight, opacity: 1, objectFit: "fill" }] : [], renderStyle: renderStyle(n.id === "root" ? { ...n.gradient, backgroundImage: n.gradient.css, opacity: 0.6, overflowX: "hidden", overflowY: "hidden", cornerRadii: Array(4).fill("12px") } : {}) })) };
+  const measured = { sampleId: "mcp-baseline", collectedAt: new Date().toISOString(), viewport: { width: 1200, height: 900, devicePixelRatio: 1 }, collectorVersion: 5, coordinateSpace: "root-relative", stable: true, fontsReady: true, brokenImages: [], nodes: [saved.nodes[0], ...saved.nodes[0].children].map((n) => ({ id: n.id, rootId: n.rootId, parentId: n.parentId, visible: true, bounds: n.renderAs === "image" && n.relativeImageBounds ? n.relativeImageBounds : n.relativeBounds, tagName: n.assetId ? "IMG" : "DIV", imageSources: n.assetId ? [saved.assets[n.assetId].path] : [], textStyle: n.type === "TEXT" ? { fontSize: n.fontSize, lineHeight: n.lineHeight.pixels, fontWeight: n.fontWeight, fontStyle: "normal", letterSpacing: 0, textAlign: "left", direction: "ltr", textDecorationLine: "none", color: n.textColor.css, textFillColor: n.textColor.css } : undefined, assetImages: n.assetId ? [{ assetId: n.assetId, src: saved.assets[n.assetId].path, bounds: n.relativeImageBounds, naturalWidth: saved.assets[n.assetId].pixelWidth, naturalHeight: saved.assets[n.assetId].pixelHeight, opacity: 1, objectFit: "fill" }] : [], renderStyle: renderStyle(n.id === "root" ? { ...n.gradient, backgroundImage: n.gradient.css, opacity: 0.6, overflowX: "hidden", overflowY: "hidden", cornerRadii: Array(4).fill("12px") } : {}) })) };
   // Synthetic measurements exercise the MCP comparison API, not browser rendering.
   measured.nodes[1].bounds = { ...measured.nodes[1].bounds, x: 10 };
   const blocked = await client.callTool({ name: "figma_validate_layout", arguments: { designPath: saved.meta.designPath, actual: measured } });

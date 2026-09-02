@@ -182,6 +182,13 @@ function addRelativeBounds(node, root, parent) {
 
 function isPureShape(node) {
   var type = readProp(node, "type", "");
+  // An IMAGE paint is content, not vector geometry. Keep its surrounding group
+  // expanded so the image remains an independently addressable image-render
+  // layer instead of being baked into a composite-shape PNG.
+  var paints = [].concat(readProp(node, "fills", []) || [], readProp(node, "strokes", []) || []);
+  for (var p = 0; p < paints.length; p++) {
+    if (paintIsVisible(paints[p]) && paints[p].type === "IMAGE") return false;
+  }
   if (["VECTOR", "BOOLEAN_OPERATION", "RECTANGLE", "ELLIPSE", "LINE", "POLYGON", "STAR"].indexOf(type) !== -1) return true;
   if (type !== "GROUP") return false;
   var children = readProp(node, "children", []), count = 0;
@@ -314,7 +321,12 @@ function textRasterReason(node, base) {
   if (hasMixedStyle && !base.styledTextSegments) return "mixed-text-style";
   if (base.lineHeight.unit === "AUTO" && base.lineHeight.source !== "figma-css") return "unresolved-auto-line-height";
   if (base.strokes && base.strokes.some(function(p) { return p.visible !== false && p.opacity !== 0; })) return "text-stroke";
-  if (!base.textColor && !base.styledTextSegments) return "complex-text-paint";
+  // A single supported linear gradient can stay selectable DOM text. The
+  // preview and validator express it with a node-sized background clipped to
+  // the glyphs. Other text paints remain conservative raster fallbacks.
+  var visibleFills = (base.fills || []).filter(function(p) { return p.visible !== false && p.opacity !== 0; });
+  var supportedGradientText = visibleFills.length === 1 && visibleFills[0].type === "GRADIENT_LINEAR" && gradientRasterReason(base) === null;
+  if (!base.textColor && !base.styledTextSegments && !supportedGradientText) return "complex-text-paint";
   return null;
 }
 
@@ -691,18 +703,348 @@ function wrapMsg(base, requestId) {
   return base;
 }
 
+function sceneChildren(node) {
+  var children = readProp(node, "children", []);
+  return Array.isArray(children) ? children : [];
+}
+
+function walkScene(node, visit) {
+  visit(node);
+  var children = sceneChildren(node);
+  for (var i = 0; i < children.length; i++) walkScene(children[i], visit);
+}
+
+function topLevelSelection(selection) {
+  var result = [];
+  for (var i = 0; i < selection.length; i++) {
+    var ancestor = readProp(selection[i], "parent", null), nested = false;
+    while (ancestor) {
+      if (selection.indexOf(ancestor) !== -1) { nested = true; break; }
+      ancestor = readProp(ancestor, "parent", null);
+    }
+    if (!nested) result.push(selection[i]);
+  }
+  return result;
+}
+
+function sameStringSet(actual, expected) {
+  if (actual.length !== expected.length) return false;
+  var seen = {};
+  for (var i = 0; i < actual.length; i++) seen[actual[i]] = (seen[actual[i]] || 0) + 1;
+  for (var j = 0; j < expected.length; j++) {
+    if (!seen[expected[j]]) return false;
+    seen[expected[j]]--;
+  }
+  return true;
+}
+
+function insideInstance(node, rootsById) {
+  var current = node;
+  while (current && !rootsById[current.id]) {
+    if (readProp(current, "type", "") === "INSTANCE") return true;
+    current = readProp(current, "parent", null);
+  }
+  return current && readProp(current, "type", "") === "INSTANCE";
+}
+
+function collectOptimizationFonts(roots) {
+  var fonts = {}, list = [];
+  for (var r = 0; r < roots.length; r++) walkScene(roots[r], function(node) {
+    if (readProp(node, "type", "") !== "TEXT") return;
+    var names = [];
+    try {
+      var characters = String(readProp(node, "characters", ""));
+      names = typeof node.getRangeAllFontNames === "function" && characters.length ? node.getRangeAllFontNames(0, characters.length) : [readProp(node, "fontName", null)];
+    } catch (e) { names = [readProp(node, "fontName", null)]; }
+    for (var i = 0; i < names.length; i++) {
+      var font = names[i];
+      if (!font || isMixed(font) || typeof font.family !== "string" || typeof font.style !== "string") continue;
+      var key = font.family + "\n" + font.style;
+      if (!fonts[key]) { fonts[key] = true; list.push(font); }
+    }
+  });
+  return list;
+}
+
+function mapCloneTree(source, clone, sourceToClone, createdIds) {
+  sourceToClone[source.id] = clone;
+  createdIds.push(clone.id);
+  var sourceChildren = sceneChildren(source), cloneChildren = sceneChildren(clone);
+  if (sourceChildren.length !== cloneChildren.length) throw new Error("复制后节点结构不一致：" + source.id);
+  for (var i = 0; i < sourceChildren.length; i++) mapCloneTree(sourceChildren[i], cloneChildren[i], sourceToClone, createdIds);
+}
+
+function overlaps(a, b) {
+  return Math.max(0, Math.min(a.right, b.right) - Math.max(a.left, b.left)) * Math.max(0, Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top)) > 0.5;
+}
+
+function orderVisualComponents(parent, children, floatingNodes) {
+  if (children.length < 2) return children.slice();
+  var parentBounds = absoluteBoundsOf(parent), parentArea = Math.max(1, parentBounds.width * parentBounds.height);
+  var backgrounds = [], content = [], floating = [];
+  for (var i = 0; i < children.length; i++) {
+    var bounds = absoluteBoundsOf(children[i]);
+    var coverage = bounds.width * bounds.height / parentArea;
+    var name = String(readProp(children[i], "name", "")).toLowerCase();
+    var backgroundName = /(^|[\s_\-/])(bg|background|backdrop)([\s_\-/]|$)|背景|底图|底色/.test(name);
+    if (floatingNodes && floatingNodes.has(children[i])) floating.push({ node: children[i], index: i, bounds: bounds });
+    else if (readProp(children[i], "type", "") !== "TEXT" && coverage >= 0.8 && (i === 0 || backgroundName)) backgrounds.push({ node: children[i], index: i, bounds: bounds });
+    else content.push({ node: children[i], index: i, bounds: bounds });
+  }
+  content.sort(function(a, b) {
+    var rowOverlap = Math.max(0, Math.min(a.bounds.bottom, b.bounds.bottom) - Math.max(a.bounds.top, b.bounds.top));
+    var sameRow = rowOverlap >= Math.min(a.bounds.height, b.bounds.height) * 0.5;
+    if (sameRow && Math.abs(a.bounds.left - b.bounds.left) > 0.5) return a.bounds.left - b.bounds.left;
+    if (Math.abs(a.bounds.top - b.bounds.top) > 0.5) return a.bounds.top - b.bounds.top;
+    if (Math.abs(a.bounds.left - b.bounds.left) > 0.5) return a.bounds.left - b.bounds.left;
+    return a.index - b.index;
+  });
+  // Figma's Layers panel displays the last painted child first. Therefore the
+  // paint array must contain content in reverse reading order for the panel to
+  // read top-to-bottom and, within a row, left-to-right. Overlapping pairs keep
+  // their original paint order via a DAG constraint; unlike connected-component
+  // grouping, one large backdrop cannot freeze every otherwise independent node.
+  var desired = backgrounds.sort(function(a, b) { return a.index - b.index; }).concat(content.slice().reverse(), floating.sort(function(a, b) { return a.index - b.index; }));
+  var rank = new Map();
+  for (var d = 0; d < desired.length; d++) rank.set(desired[d].node, d);
+  var items = backgrounds.concat(content, floating), edges = [], indegree = [];
+  items.sort(function(a, b) { return a.index - b.index; });
+  for (var e = 0; e < items.length; e++) { edges[e] = []; indegree[e] = 0; }
+  for (var from = 0; from < items.length; from++) for (var to = from + 1; to < items.length; to++) {
+    if (!overlaps(items[from].bounds, items[to].bounds)) continue;
+    edges[from].push(to); indegree[to]++;
+  }
+  var available = [], ordered = [];
+  for (var z = 0; z < items.length; z++) if (indegree[z] === 0) available.push(z);
+  while (available.length) {
+    available.sort(function(a, b) { return rank.get(items[a].node) - rank.get(items[b].node); });
+    var next = available.shift(); ordered.push(items[next].node);
+    for (var edge = 0; edge < edges[next].length; edge++) {
+      var target = edges[next][edge];
+      indegree[target]--;
+      if (indegree[target] === 0) available.push(target);
+    }
+  }
+  return ordered.length === children.length ? ordered : children.slice();
+}
+
+function isCompletelyClippedOut(node, root) {
+  var bounds = absoluteBoundsOf(node), ancestor = readProp(node, "parent", null);
+  while (ancestor) {
+    if (readProp(ancestor, "clipsContent", false)) {
+      var clip = absoluteBoundsOf(ancestor);
+      var left = Math.max(bounds.left, clip.left), top = Math.max(bounds.top, clip.top);
+      var right = Math.min(bounds.right, clip.right), bottom = Math.min(bounds.bottom, clip.bottom);
+      if (right - left <= 0.5 || bottom - top <= 0.5) return true;
+      bounds = { left: left, top: top, right: right, bottom: bottom, x: left, y: top, width: right - left, height: bottom - top };
+    }
+    if (ancestor === root) break;
+    ancestor = readProp(ancestor, "parent", null);
+  }
+  return false;
+}
+
+function removeInvisibleCloneNodes(root, removedSourceIds, cloneToSource, protectedIds) {
+  function visit(parent, protectedByInstance) {
+    var children = sceneChildren(parent).slice();
+    for (var i = children.length - 1; i >= 0; i--) {
+      var child = children[i], sourceId = cloneToSource[child.id];
+      var protectedHere = protectedByInstance || readProp(parent, "type", "") === "INSTANCE";
+      var invisible = !shouldExportNode(child) || isCompletelyClippedOut(child, root);
+      if (protectedHere) { if (invisible) protectedIds.push(sourceId); continue; }
+      if (invisible) { removedSourceIds.push(sourceId); child.remove(); continue; }
+      visit(child, readProp(child, "type", "") === "INSTANCE");
+    }
+  }
+  visit(root, readProp(root, "type", "") === "INSTANCE");
+}
+
+async function optimizeSelection(request) {
+  var plan = request && request.plan;
+  if (!plan || !Array.isArray(request.expectedSelectionIds) || !request.expectedSelectionIds.length) throw new Error("优化请求缺少 expectedSelectionIds 或 plan");
+  var roots = topLevelSelection(figma.currentPage.selection);
+  var selectedIds = roots.map(function(node) { return node.id; });
+  if (!sameStringSet(selectedIds, request.expectedSelectionIds)) throw new Error("当前 Figma 选区与模型计划不一致；请重新 figma_export 后再生成优化计划");
+  var sourceById = {}, rootsById = {}, nodeCount = 0;
+  for (var r = 0; r < roots.length; r++) {
+    rootsById[roots[r].id] = true;
+    walkScene(roots[r], function(node) { sourceById[node.id] = node; nodeCount++; });
+  }
+  if (nodeCount > 5000) throw new Error("单次节点优化最多支持 5000 个节点");
+  var reorderParentIds = Array.isArray(plan.reorderParentIds) ? plan.reorderParentIds : [];
+  var ungroupNodeIds = Array.isArray(plan.ungroupNodeIds) ? plan.ungroupNodeIds : [];
+  var groups = Array.isArray(plan.groups) ? plan.groups : [];
+  var postGroups = Array.isArray(plan.postGroups) ? plan.postGroups : [];
+  var rootArchitectureNodeIds = Array.isArray(plan.rootArchitectureNodeIds) ? plan.rootArchitectureNodeIds : [];
+  var floatingNodeIds = Array.isArray(plan.floatingNodeIds) ? plan.floatingNodeIds : [];
+  if (reorderParentIds.length > 200 || ungroupNodeIds.length > 200 || groups.length + postGroups.length > 100 || rootArchitectureNodeIds.length > 100 || floatingNodeIds.length > 100) throw new Error("优化计划操作数量过多");
+  var operationIds = reorderParentIds.concat(ungroupNodeIds, rootArchitectureNodeIds, floatingNodeIds);
+  var allGroups = groups.concat(postGroups);
+  for (var gi = 0; gi < allGroups.length; gi++) operationIds.push(allGroups[gi].parentId), operationIds = operationIds.concat(allGroups[gi].childIds || []);
+  for (var oi = 0; oi < operationIds.length; oi++) if (!sourceById[operationIds[oi]]) throw new Error("优化计划引用了选区外节点：" + operationIds[oi]);
+  for (var ri = 0; ri < reorderParentIds.length; ri++) {
+    var reorderSource = sourceById[reorderParentIds[ri]];
+    if (!sceneChildren(reorderSource).length) throw new Error("排序目标不是容器：" + reorderSource.id);
+    if (insideInstance(reorderSource, rootsById)) throw new Error("不能重排组件实例内部结构：" + reorderSource.id);
+    if (sceneChildren(reorderSource).some(function(child) { return readProp(child, "isMask", false); })) throw new Error("含蒙版的容器不允许自动重排：" + reorderSource.id);
+  }
+  for (var ui = 0; ui < ungroupNodeIds.length; ui++) {
+    var ungroupSource = sourceById[ungroupNodeIds[ui]];
+    if (readProp(ungroupSource, "type", "") !== "GROUP") throw new Error("只允许解组 GROUP：" + ungroupSource.id);
+    if (insideInstance(ungroupSource, rootsById)) throw new Error("不能解组组件实例内部节点：" + ungroupSource.id);
+  }
+  var ungroupSet = {};
+  for (var us = 0; us < ungroupNodeIds.length; us++) ungroupSet[ungroupNodeIds[us]] = true;
+  function childrenAfterPlannedUngroup(parent) {
+    var flattened = [], direct = sceneChildren(parent);
+    for (var dc = 0; dc < direct.length; dc++) {
+      if (ungroupSet[direct[dc].id]) flattened = flattened.concat(sceneChildren(direct[dc]));
+      else flattened.push(direct[dc]);
+    }
+    return flattened;
+  }
+  var protectedStructureIds = new Set(rootArchitectureNodeIds.concat(floatingNodeIds));
+  for (var pi = 0; pi < allGroups.length; pi++) {
+    var spec = allGroups[pi], parent = sourceById[spec.parentId], childIds = spec.childIds || [];
+    if (!parent || childIds.length < 2 || childIds.length > 50 || new Set(childIds).size !== childIds.length) throw new Error("成组计划无效：" + String(spec.name || spec.parentId));
+    if (insideInstance(parent, rootsById)) throw new Error("不能在组件实例内部成组：" + parent.id);
+    var sourceChildren = childrenAfterPlannedUngroup(parent), indexes = [];
+    for (var ci = 0; ci < childIds.length; ci++) {
+      var child = sourceById[childIds[ci]];
+      if (protectedStructureIds.has(childIds[ci])) throw new Error("页面骨架或浮动节点必须保持根级独立：" + childIds[ci]);
+      if (!child || sourceChildren.indexOf(child) === -1) throw new Error("成组节点必须是当前父级或计划解组后的直接子节点：" + childIds[ci]);
+      indexes.push(sourceChildren.indexOf(child));
+    }
+    indexes.sort(function(a, b) { return a - b; });
+    for (var ii = 1; pi < groups.length && ii < indexes.length; ii++) if (indexes[ii] !== indexes[ii - 1] + 1) {
+      var between = sourceChildren.slice(indexes[ii - 1] + 1, indexes[ii]).map(function(node) { return node.id + "(" + String(readProp(node, "name", "")) + ")"; });
+      throw new Error("为避免改变层叠关系，只允许将连续同级节点成组：" + String(spec.name) + "；间隔节点：" + between.join("、"));
+    }
+  }
+  var fonts = collectOptimizationFonts(roots);
+  var unavailableFonts = [];
+  for (var fi = 0; fi < fonts.length; fi++) {
+    try { await figma.loadFontAsync(fonts[fi]); }
+    catch (fontError) { unavailableFonts.push(fonts[fi].family + " " + fonts[fi].style); }
+  }
+  var modeCollections = {};
+  for (var mr = 0; mr < roots.length; mr++) {
+    var modes = readProp(roots[mr], "resolvedVariableModes", {});
+    var collectionIds = Object.keys(modes);
+    for (var mi = 0; mi < collectionIds.length; mi++) {
+      if (!modeCollections[collectionIds[mi]]) {
+        var collection = await figma.variables.getVariableCollectionByIdAsync(collectionIds[mi]);
+        if (!collection) throw new Error("无法保留变量模式：" + collectionIds[mi]);
+        modeCollections[collectionIds[mi]] = collection;
+      }
+    }
+  }
+  var clones = [], createdIds = [], mutatedIds = [], sourceToClone = {}, cloneToSource = {};
+  try {
+    var sourceBounds = roots.map(absoluteBoundsOf);
+    var selectionLeft = Math.min.apply(null, sourceBounds.map(function(b) { return b.left; }));
+    var selectionRight = Math.max.apply(null, sourceBounds.map(function(b) { return b.right; }));
+    var pageRight = selectionRight;
+    var pageChildren = sceneChildren(figma.currentPage);
+    for (var pc = 0; pc < pageChildren.length; pc++) {
+      if (roots.indexOf(pageChildren[pc]) !== -1) continue;
+      pageRight = Math.max(pageRight, absoluteBoundsOf(pageChildren[pc]).right);
+    }
+    var shiftX = pageRight + (typeof request.spacing === "number" ? request.spacing : 200) - selectionLeft;
+    for (var cr = 0; cr < roots.length; cr++) {
+      var sourceRoot = roots[cr], clone = sourceRoot.clone(), transform = readProp(sourceRoot, "absoluteTransform", null);
+      clones.push(clone);
+      if (transform) clone.relativeTransform = [[transform[0][0], transform[0][1], transform[0][2] + shiftX], [transform[1][0], transform[1][1], transform[1][2]]];
+      else clone.x = sourceBounds[cr].x + shiftX, clone.y = sourceBounds[cr].y;
+      clone.name = sourceRoot.name + " · " + (request.copyName || "DOM优化");
+      var rootModes = readProp(sourceRoot, "resolvedVariableModes", {}), rootCollectionIds = Object.keys(rootModes);
+      for (var rm = 0; rm < rootCollectionIds.length; rm++) clone.setExplicitVariableModeForCollection(modeCollections[rootCollectionIds[rm]], rootModes[rootCollectionIds[rm]]);
+      mapCloneTree(sourceRoot, clone, sourceToClone, createdIds);
+    }
+    var sourceIds = Object.keys(sourceToClone);
+    for (var si = 0; si < sourceIds.length; si++) cloneToSource[sourceToClone[sourceIds[si]].id] = sourceIds[si];
+    var removedSourceIds = [], protectedInvisibleSourceIds = [];
+    if (plan.removeInvisible !== false) for (var rr = 0; rr < clones.length; rr++) removeInvisibleCloneNodes(clones[rr], removedSourceIds, cloneToSource, protectedInvisibleSourceIds);
+    var ungroupedSourceIds = [];
+    for (var ug = 0; ug < ungroupNodeIds.length; ug++) {
+      var groupClone = sourceToClone[ungroupNodeIds[ug]];
+      if (!groupClone || readProp(groupClone, "removed", false)) continue;
+      var ungrouped = figma.ungroup(groupClone);
+      for (var uc = 0; uc < ungrouped.length; uc++) mutatedIds.push(ungrouped[uc].id);
+      ungroupedSourceIds.push(ungroupNodeIds[ug]);
+    }
+    var createdGroups = [];
+    function applyPlannedGroups(groupSpecs, stage) {
+    for (var gp = 0; gp < groupSpecs.length; gp++) {
+      var groupSpec = groupSpecs[gp], groupParent = sourceToClone[groupSpec.parentId];
+      if (!groupParent || readProp(groupParent, "removed", false)) continue;
+      var groupChildren = groupSpec.childIds.map(function(id) { return sourceToClone[id]; }).filter(function(node) { return node && !readProp(node, "removed", false) && readProp(node, "parent", null) === groupParent; });
+      if (groupChildren.length !== groupSpec.childIds.length) throw new Error("成组节点已被其他优化操作移除或改变父级：" + groupSpec.name);
+      var currentGroupChildren = sceneChildren(groupParent), currentIndexes = groupChildren.map(function(node) { return currentGroupChildren.indexOf(node); }).sort(function(a, b) { return a - b; });
+      for (var cg = 1; cg < currentIndexes.length; cg++) if (currentIndexes[cg] !== currentIndexes[cg - 1] + 1) throw new Error(stage + "成组节点尚未连续，请调整模型计划：" + groupSpec.name);
+      var firstIndex = currentIndexes[0];
+      groupChildren.sort(function(a, b) { return currentGroupChildren.indexOf(a) - currentGroupChildren.indexOf(b); });
+      var newGroup = figma.group(groupChildren, groupParent, firstIndex);
+      newGroup.name = groupSpec.name;
+      createdIds.push(newGroup.id); mutatedIds.push(newGroup.id);
+      createdGroups.push({ id: newGroup.id, name: newGroup.name, sourceChildIds: groupSpec.childIds, stage: stage });
+    }
+    }
+    applyPlannedGroups(groups, "architecture-first");
+    var reorderedParentSourceIds = [];
+    for (var ro = 0; ro < reorderParentIds.length; ro++) {
+      var parentClone = sourceToClone[reorderParentIds[ro]];
+      if (!parentClone || readProp(parentClone, "removed", false)) continue;
+      var floatingClones = new Set(floatingNodeIds.map(function(id) { return sourceToClone[id]; }).filter(Boolean));
+      var current = sceneChildren(parentClone).slice(), ordered = orderVisualComponents(parentClone, current, floatingClones), changed = false;
+      for (var oc = 0; oc < ordered.length; oc++) if (ordered[oc] !== current[oc]) { changed = true; break; }
+      if (changed) {
+        for (var ins = 0; ins < ordered.length; ins++) parentClone.insertChild(ins, ordered[ins]);
+        mutatedIds.push(parentClone.id); reorderedParentSourceIds.push(reorderParentIds[ro]);
+      }
+    }
+    applyPlannedGroups(postGroups, "post-order");
+    var requiredRootIds = rootArchitectureNodeIds.concat(floatingNodeIds);
+    for (var rootCheck = 0; rootCheck < requiredRootIds.length; rootCheck++) {
+      var requiredClone = sourceToClone[requiredRootIds[rootCheck]];
+      if (!requiredClone || clones.indexOf(readProp(requiredClone, "parent", null)) === -1) throw new Error("页面骨架或浮动节点未保持在优化根级：" + requiredRootIds[rootCheck]);
+    }
+    figma.currentPage.selection = clones;
+    figma.viewport.scrollAndZoomIntoView(clones);
+    figma.commitUndo();
+    return {
+      status: "optimized", summary: plan.summary,
+      sourceRootIds: selectedIds, optimizedRootIds: clones.map(function(node) { return node.id; }),
+      createdNodeIds: createdIds, mutatedNodeIds: Array.from(new Set(mutatedIds.concat(clones.map(function(node) { return node.id; })))),
+      removedInvisibleSourceNodeIds: removedSourceIds, protectedInvisibleSourceNodeIds: protectedInvisibleSourceIds,
+      reorderedParentSourceIds: reorderedParentSourceIds, ungroupedSourceNodeIds: ungroupedSourceIds, createdGroups: createdGroups,
+      rootArchitectureSourceNodeIds: rootArchitectureNodeIds, floatingSourceNodeIds: floatingNodeIds,
+      warnings: unavailableFonts.length ? [{ type: "unavailable-fonts", fonts: unavailableFonts, action: "No text properties were modified; structural optimization continued on the copied nodes." }] : []
+    };
+  } catch (error) {
+    for (var cleanup = 0; cleanup < clones.length; cleanup++) try { if (!readProp(clones[cleanup], "removed", false)) clones[cleanup].remove(); } catch (e) {}
+    throw error;
+  }
+}
+
 // One export at a time, including manual and MCP requests.
 var exportInProgress = false;
 figma.ui.onmessage = async function(msg) {
   var rid = msg.requestId;
   if (msg.type === "cancel") { figma.closePlugin(); return; }
-  if (msg.type !== "export") return;
+  if (msg.type !== "export" && msg.type !== "optimize") return;
   if (exportInProgress) {
     figma.ui.postMessage(wrapMsg({ type: "error", message: "已有导出正在执行，请等待完成后重试" }, rid));
     return;
   }
   exportInProgress = true;
   try {
+    if (msg.type === "optimize") {
+      figma.ui.postMessage(wrapMsg({ type: "progress", message: "正在复制选区并执行节点结构优化..." }, rid));
+      var optimized = await optimizeSelection(msg.request);
+      figma.ui.postMessage(wrapMsg({ type: "optimized", data: optimized }, rid));
+      return;
+    }
     var selection = figma.currentPage.selection;
     if (selection.length === 0) throw new Error("请先选中至少一个节点");
     var context = { shapeGroupsAsImages: msg.shapeGroupsAsImages !== false, rasters: [] };
@@ -810,7 +1152,7 @@ figma.ui.onmessage = async function(msg) {
     nodes.forEach(clean);
     figma.ui.postMessage(wrapMsg({ type: "done", data: JSON.parse(JSON.stringify(data)), imageCount: imageCount }, rid));
   } catch (error) {
-    figma.ui.postMessage(wrapMsg({ type: "error", message: "导出失败：" + (error && error.message ? error.message : error) }, rid));
+    figma.ui.postMessage(wrapMsg({ type: "error", message: (msg.type === "optimize" ? "节点优化失败：" : "导出失败：") + (error && error.message ? error.message : error) }, rid));
   } finally {
     exportInProgress = false;
   }

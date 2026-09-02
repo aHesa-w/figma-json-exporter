@@ -40,6 +40,7 @@ node /absolute/path/to/figma-json-exporter/dist/mcp-server.js
 
 - `figma_status`：默认检查 Figma 插件；传 `mode: "pen"` 时检查本地 `.pen` 文件并列出顶层节点。
 - `figma_export`：默认导出 Figma 当前选区；传 `mode: "pen"` 时导出 `.pen` 文件中的指定节点。两种模式都先将完整设计、图片、计划和模型无关基础预览写入本地；MCP 默认只返回根节点、计数和文件路径的紧凑摘要，只有显式传 `responseMode: "full"` 才返回完整设计 JSON。
+- `figma_optimize_selection`：由模型先阅读最新 `figma_export` 的层级与几何，再提交仅含节点 ID 的白名单结构计划。插件校验当前选区未变化后，在画布右侧创建副本，清理副本中的不可见节点、将指定容器调整为从上到下/从左到右的阅读顺序、解散冗余 Group 并创建显式语义分组；原节点不修改。
 - `figma_assess_preview`：生成实现前的强制门禁。模型必须先打开 `previewHtmlPath`，读取 `previewCssPath` 和 `generationManifestPath`，再提交需要保留的预览决策、缺口、改动及对应图层 ID；返回 baseline 必需的 `previewAssessmentPath`。
 - `figma_guidance`：按标签渐进式加载实现/推断标准。传入 `semantic-plan.json` 中容器、重复组、交互候选携带的 `guidanceTags`，或阶段标签（`workflow`/`baseline`/`flow`/`style`）、图层属性标签（`image`/`gradient`/`text`/`clipping`/`mask`/`paint`）或 `subagent`；不传标签时列出全部可用标签。
 - `figma_validate_layout`：将浏览器实测矩形与设计 JSON 比较，返回逐层偏差及完整报告路径；可用 `mode` 断言设计来源。
@@ -59,6 +60,8 @@ node dist/mcp-server.js --transport=http
 2. 选择本目录的 `manifest.json`。
 3. 选中设计节点，运行 JSON Exporter 插件。
 4. 手动点击“导出”，或等插件连接本机服务后通过 Agent 调用 MCP。
+
+节点结构优化的推荐顺序是：保持目标选区不变并调用 `figma_export`；模型基于该次导出的根 ID、父子关系和绝对几何制定计划；随后调用 `figma_optimize_selection`。计划不能包含脚本或任意属性写入，只能指定需要排序的容器、需要解散的 Group 和需要创建的连续同级分组。重叠节点保持原有内部绘制顺序；Instance 内部、含蒙版容器、非连续成组和选区变化会被拒绝。成功后 Figma 选中优化副本，并返回全部创建/修改节点 ID；一次 Undo 可撤销这次副本创建。
 
 插件需要保留 `manifest.json`、`code.js` 和 `ui.html`。UI 的“启动”按钮只重新检测和连接服务；本地进程由 JS 入口启动。“关闭”会停止共享服务，再次启动 stdio 客户端时重新检活和启动。
 
@@ -140,7 +143,7 @@ Agent 调用示例（路径替换为实际文件）：
 
 新增报告字段：`phase`、`workflowComplete`、`baselineReportPath`、`flowMismatches`、`flowExceptions`。首轮通过后的 `nextAction` 会明确要求重构并进行第二轮。`semantic-plan.json` 提供源码编排建议，并不伪装成源码或交互自动验收；自动验收仍不证明像素、响应式行为、完整交互或代码质量。MCP 负责约束和比较，HTML/CSS 修改与浏览器执行由 Agent 完成，不会自行重写用户页面。
 
-本次服务版本为 **3.12.1**，Figma 插件仍为 **3.5.0**。`figma_status` 在 Figma 模式下忽略误带的 `penPath`；Pen 模式支持绝对路径和 `~/...`，相对路径返回可恢复的工具错误而不是 MCP `-32602`。3.12.0 的全面禁用 Grid、此前 preview-first 门禁、混合文字分段和 DOM 文字禁止软换行保持不变；采集器仍为 **collectorVersion: 5**。
+本次服务版本为 **3.15.0**，Figma 插件仍为 **3.5.0**。新增模型规划、Figma 执行的 `figma_optimize_selection`：它只在当前选区的副本上清理不可见节点，并先把横向中线接近的兄弟节点、同一视觉区块的背景/前景层建立为架构组，再按各组左上角对 Figma 图层面板排序；组内保留原始绘制顺序。状态栏、底部等页面骨架可声明为必须保持根级的直接子节点；没有明确同行关系的收起按钮、浮动操作可声明为独立 overlay，禁止被内容组吸收。对于原始绘制数组中不连续、但在一级排序后能够安全相邻的架构节点，可使用受限的二阶段成组。它也能解散冗余 Group，完全落在祖先裁剪区外的节点会被清理，原节点、实例内部结构和含蒙版容器受到保护。`figma_status` 在 Figma 模式下忽略误带的 `penPath`；Pen 模式支持绝对路径和 `~/...`。全面禁用 Grid、preview-first 门禁、混合文字分段和 DOM 文字禁止软换行保持不变；采集器仍为 **collectorVersion: 5**。
 
 ## 图片先落盘，JSON 后返回
 
@@ -173,7 +176,7 @@ export-<uuid>/
 
 ### 组合形状整体导出
 
-默认将 VECTOR、BOOLEAN_OPERATION，以及所有可见后代均为形状的 GROUP 导出成 2 倍 PNG。含 TEXT、FRAME 或 INSTANCE 的普通布局组不会被整体栅格化，文字和布局仍保留为节点。
+默认将 VECTOR、BOOLEAN_OPERATION，以及所有可见后代均为非图片形状的 GROUP 导出成 2 倍 PNG。带可见 IMAGE 填充/描边的节点属于图片内容，不计作纯形状，也会阻止祖先 GROUP 被整体折叠；图片节点仍独立导出。含 TEXT、FRAME 或 INSTANCE 的普通布局组同样不会被整体栅格化，文字和布局仍保留为节点。
 
 这些节点标记为 `renderAs: "image"`，有 `assetId` 和 `collapsedNodeIds`，不再带 `children`。实现时视为一个原子图层，校验它的整体边界，不再为合并的内部路径创建 DOM。PNG 已包含该节点的外观和透明度，不应再次应用同一节点的填充、旋转或透明度；外层容器的样式仍须保留。可用 `shapeGroupsAsImages: false` 关闭，手动导出也有对应选项。
 
@@ -205,7 +208,7 @@ PNG 使用 Figma 的 `exportAsync`、`useAbsoluteBounds: true`。v3.3 将布局�
 
 ## v3.5.0：混合文字分段
 
-当 TEXT 节点只有颜色、字重、字号、字体、行高、字距、大小写或装饰等可表达的局部差异时，插件使用 Figma `getStyledTextSegments` 导出连续字符范围；预览为各范围生成无内联样式的 `<span>` 和 CSS。DOM 文字默认 `white-space: pre`：保留源文本中的显式换行，但不允许浏览器因容器宽度自行软换行，分段 `<span>` 继承同一规则。每段必须使用可移植系统字体、单一实色文字填充及可解析的排版值。渐变/图片文字填充、文字描边、混合段落属性、未知字体、AUTO 分段行高或字符范围不完整时继续输出 PNG，不能为了 DOM 文本丢失视觉语义。
+当 TEXT 节点只有颜色、字重、字号、字体、行高、字距、大小写或装饰等可表达的局部差异时，插件使用 Figma `getStyledTextSegments` 导出连续字符范围；预览为各范围生成无内联样式的 `<span>` 和 CSS。DOM 文字默认 `white-space: pre`：保留源文本中的显式换行，但不允许浏览器因容器宽度自行软换行，分段 `<span>` 继承同一规则。每段必须使用可移植系统字体、单一实色文字填充及可解析的排版值。未分段文字的单一可支持线性渐变会保留为 DOM 文本，以节点尺寸背景和 `background-clip:text` 表达；图片文字填充、文字描边、复杂/不支持的渐变、混合段落属性、未知字体、AUTO 分段行高或字符范围不完整时继续输出 PNG，不能为了 DOM 文本丢失视觉语义。
 
 ## v3.4.1：空视觉边界恢复
 
@@ -231,12 +234,12 @@ Figma 的 `absoluteRenderBounds` 允许为 `null`，不能仅凭此认定图层�
 - **颜色空间**：记录文档 color profile；PNG 显式导出为 sRGB。Display P3 文档的文字采取图片转换路径，不将未经转换的通道直接当作 sRGB CSS；这不等于保证保留超出 sRGB 的所有颜色。其他宽色域填充/合成仍需视觉复核。
 - **图片边界**：`absoluteBounds` 仍是布局框；`imageBounds` 是布局框和 `absoluteRenderBounds` 的并集；`imagePlacement` 是图片相对本图层的偏移与尺寸；`relativeImageBounds` 用于浏览器图片位置比较。不是简单给宽高加两倍 strokeWeight，而是使用 Figma 提供的实际视觉边界，覆盖 OUTSIDE/CENTER 描边、阴影 spread/offset、模糊、斜体字形外伸及超框子形状。[Figma 布局框与视觉边界定义](https://developers.figma.com/docs/plugins/api/node-properties/#absoluterenderbounds)
 
-比如布局框 `100×50`，视觉内容四边各超出 4px：外层仍是 `100×50`，图片为 `108×58`，left/top 为 `-4px`，2 倍 PNG 为 `216×116`。实现结构：
+比如布局框 `100×50`，视觉内容四边各超出 4px：带图层 ID 的可视容器和图片均为 `108×58`，容器相对原布局位置 left/top 各前移 `4px`，2 倍 PNG 为 `216×116`。`absoluteBounds` 仍保留原始布局信息，但浏览器几何按完整图片画布验收。实现结构：
 
 ```html
-<div data-d2c-id="layer-id" style="position:absolute;width:100px;height:50px;overflow:visible">
+<div data-d2c-id="layer-id" style="position:absolute;left:-4px;top:-4px;width:108px;height:58px;overflow:visible">
   <img data-d2c-asset="node-layer-id" src="images/original-hash.png" alt=""
-       style="position:absolute;left:-4px;top:-4px;width:108px;height:58px;object-fit:fill">
+       style="position:absolute;left:0;top:0;width:108px;height:58px;object-fit:fill">
 </div>
 ```
 

@@ -40,6 +40,7 @@ Both `mcp-config.json` and `mcp-config.stdio.json` use the compiled entry; repla
 
 - `figma_status`: checks the Figma plugin by default; with `mode: "pen"` it checks a local `.pen` file and lists its top-level nodes.
 - `figma_export`: exports the current Figma selection by default; with `mode: "pen"` it exports selected nodes from a `.pen` file. Both modes persist the full design, assets, plans and a model-free starter preview first. MCP returns a compact roots/counts/files summary by default; pass `responseMode: "full"` only when the complete design JSON is explicitly needed in context.
+- `figma_optimize_selection`: the model first reads hierarchy and geometry from the latest `figma_export`, then submits a node-ID-only allowlisted structure plan. After confirming the live selection is unchanged, the plugin creates a copy to the right, removes invisible nodes from the copy, normalizes requested containers to top-to-bottom/left-to-right reading order, dissolves redundant Groups and creates explicit semantic groups. Originals are untouched.
 - `figma_assess_preview`: mandatory pre-implementation gate. The model must open `previewHtmlPath`, read `previewCssPath` and `generationManifestPath`, then submit preview decisions to preserve plus targeted gaps/actions and affected layer IDs. It returns the `previewAssessmentPath` required by baseline validation.
 - `figma_guidance`: progressively loads implementation/inference standards by tag. Pass the `guidanceTags` carried by semantic-plan containers/repeat groups/interaction candidates, or stage tags (`workflow`/`baseline`/`flow`/`style`), layer-property tags (`image`/`gradient`/`text`/`clipping`/`mask`/`paint`) or `subagent`; omit tags to list every available tag.
 - `figma_validate_layout`: compares browser-measured rectangles against the design JSON and returns per-layer deltas plus a full report path; `mode` can assert the design source.
@@ -59,6 +60,8 @@ Then use `http://127.0.0.1:3456/mcp` from `mcp-config.http.json`. The protocol i
 2. Choose `manifest.json` in this directory.
 3. Select the design nodes and run the JSON Exporter plugin.
 4. Either click "Export" manually, or let the agent call MCP after the plugin connects to the local service.
+
+For structure optimization, keep the target selection unchanged and call `figma_export`; let the model plan against that export's root IDs, parent-child relationships and absolute geometry; then call `figma_optimize_selection`. Plans cannot contain scripts or arbitrary property writes: they may only choose containers to reorder, Groups to dissolve and contiguous direct siblings to group. Overlapping nodes retain their internal paint order. Instance internals, mask-bearing containers, non-contiguous grouping and stale selections are rejected. On success, Figma selects the optimized copies and returns every created/mutated node ID; one Undo removes the copied result.
 
 The plugin needs `manifest.json`, `code.js` and `ui.html`. The UI's "Start" button only re-detects and reconnects the service; the local process is started by the JS entry. "Close" stops the shared service, which is re-detected and restarted the next time a stdio client starts.
 
@@ -140,7 +143,7 @@ The absolute IMG offset used inside an image to preserve outside strokes/shadows
 
 New report fields: `phase`, `workflowComplete`, `baselineReportPath`, `flowMismatches`, `flowExceptions`. After the first stage passes, `nextAction` explicitly requires refactoring and a second stage. `semantic-plan.json` provides source-arrangement suggestions and does not masquerade as source or interaction acceptance; automated acceptance still does not prove pixels, responsive behavior, complete interactions or code quality. MCP enforces constraints and comparisons; HTML/CSS edits and browser execution are done by the agent, which never rewrites the user's page itself.
 
-This service version is **3.12.1**; the Figma plugin remains **3.5.0**. `figma_status` ignores an accidental `penPath` in Figma mode; Pen mode accepts absolute and `~/...` paths, while relative paths return a recoverable tool error instead of MCP `-32602`. The 3.12.0 Grid ban, preview-first gate, styled text and no-soft-wrap behavior remain unchanged; the collector stays at **collectorVersion: 5**.
+This service version is **3.15.0**; the Figma plugin remains **3.5.0**. It adds the model-planned, Figma-executed `figma_optimize_selection`: only a copy of the current selection is changed. Siblings with close horizontal midlines and the background/foreground layers of one visual section are first organized into architectural groups; the Layers panel is then ordered by each group's top-left anchor while paint order inside groups is preserved. Page-skeleton nodes such as status bars and bottoms may be declared as required direct root children; collapse controls and floating actions without a clear row relationship may be declared as independent overlays that content groups cannot absorb. Architecture members that are non-contiguous in the raw paint array but become safely adjacent after top-level ordering may use the restricted second grouping stage. The tool can also dissolve redundant Groups and remove nodes fully outside an ancestor clip, while originals, Instance internals and mask-bearing containers are protected. `figma_status` ignores an accidental `penPath` in Figma mode, and Pen mode accepts absolute and `~/...` paths. The Grid ban, preview-first gate, styled text and no-soft-wrap behavior remain unchanged; the collector stays at **collectorVersion: 5**.
 
 ## Images land on disk first, JSON returns after
 
@@ -173,7 +176,7 @@ The node tree also keeps fills, strokes, effects, radii, text, fonts, Auto Layou
 
 ### Composite shapes exported as a whole
 
-By default, VECTOR, BOOLEAN_OPERATION, and any GROUP whose visible descendants are all shapes are exported as 2× PNGs. Ordinary layout groups containing TEXT, FRAME or INSTANCE are not rasterized as a whole; text and layout stay as nodes.
+By default, VECTOR, BOOLEAN_OPERATION, and any GROUP whose visible descendants are all non-image shapes are exported as 2× PNGs. A node with a visible IMAGE fill or stroke is image content, not a pure shape, and prevents its ancestor GROUP from collapsing; that image layer is exported independently. Ordinary layout groups containing TEXT, FRAME or INSTANCE are also not rasterized as a whole; text and layout stay as nodes.
 
 These nodes are marked `renderAs: "image"` with `assetId` and `collapsedNodeIds` and no longer carry `children`. Implement them as one atomic layer, validate its overall bounds, and do not create DOM for the merged internal paths. The PNG already contains the node's appearance and opacity; do not re-apply the same node's fill, stroke, rotation or opacity — outer container styles must still be preserved. The model-free preview follows the same rule so vector icons and charts do not acquire black/white bounding-box blocks or rectangular outlines. Disable with `shapeGroupsAsImages: false`; manual export has the matching option.
 
@@ -205,7 +208,7 @@ All `renderAs: "image"` nodes should be handled before branches like `type === "
 
 ## v3.5.0: mixed text ranges
 
-When a TEXT node only has expressible per-range differences in color, weight, size, family, line height, letter spacing, case or decoration, the plugin uses Figma `getStyledTextSegments` to export contiguous character ranges. The preview emits child `<span>` elements and external CSS without inline styles. DOM text defaults to `white-space: pre`: explicit source newlines are preserved, browser soft wrapping caused by container width is disabled, and child segments inherit the same rule. Every segment must use a portable system font, one solid text fill and resolvable typography. Gradient/image text fills, text strokes, mixed paragraph properties, unknown fonts, per-range AUTO leading or incomplete ranges keep the PNG fallback rather than losing visual semantics for selectable DOM text.
+When a TEXT node only has expressible per-range differences in color, weight, size, family, line height, letter spacing, case or decoration, the plugin uses Figma `getStyledTextSegments` to export contiguous character ranges. The preview emits child `<span>` elements and external CSS without inline styles. DOM text defaults to `white-space: pre`: explicit source newlines are preserved, browser soft wrapping caused by container width is disabled, and child segments inherit the same rule. Every segment must use a portable system font, one solid text fill and resolvable typography. A single supported linear fill on unsegmented text remains DOM text, rendered as a node-sized background with `background-clip:text`. Image text fills, text strokes, complex or unsupported gradients, mixed paragraph properties, unknown fonts, per-range AUTO leading or incomplete ranges keep the PNG fallback rather than losing visual semantics for selectable DOM text.
 
 ## v3.4.1: empty visual bounds recovery
 
@@ -231,12 +234,12 @@ Direction uses node-local coordinates; pixel appearance after rotation/flip, bac
 - **Color space**: the document color profile is recorded; PNG explicitly exports as sRGB. Display P3 text takes the image path rather than treating unconverted channels as sRGB CSS; this does not guarantee preserving every out-of-sRGB color. Other wide-gamut fills/compositions still need visual review.
 - **Image bounds**: `absoluteBounds` is still the layout box; `imageBounds` is the union of the layout box and `absoluteRenderBounds`; `imagePlacement` is the image's offset and size relative to its own layer; `relativeImageBounds` is used for browser image-position comparison. This is not simply width/height plus 2× strokeWeight — it uses the actual visual bounds Figma provides, covering OUTSIDE/CENTER strokes, shadow spread/offset, blur, italic glyph overhang and out-of-frame child shapes. [Figma layout box vs visual bounds](https://developers.figma.com/docs/plugins/api/node-properties/#absoluterenderbounds)
 
-For example, layout box `100×50` with visual content extending 4px on each side: the outer layer stays `100×50`, the image is `108×58`, left/top are `-4px`, and the 2× PNG is `216×116`. Implementation structure:
+For example, with a `100×50` layout box and visual content extending 4px on each side, both the ID-bearing visual container and image are `108×58`; the container moves 4px left/up from the original layout position, and the 2× PNG is `216×116`. `absoluteBounds` still preserves the original layout information, while browser geometry is validated against the complete image canvas. Implementation structure:
 
 ```html
-<div data-d2c-id="layer-id" style="position:absolute;width:100px;height:50px;overflow:visible">
+<div data-d2c-id="layer-id" style="position:absolute;left:-4px;top:-4px;width:108px;height:58px;overflow:visible">
   <img data-d2c-asset="node-layer-id" src="images/original-hash.png" alt=""
-       style="position:absolute;left:-4px;top:-4px;width:108px;height:58px;object-fit:fill">
+       style="position:absolute;left:0;top:0;width:108px;height:58px;object-fit:fill">
 </div>
 ```
 

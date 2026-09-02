@@ -81,7 +81,7 @@ test("atomic raster assets do not repaint vector fills or strokes on their recta
     assets: { icon: { id: "icon", relativePath: "images/icon.png" } },
     nodes: [{ id: "atomic-root", name: "Atomic", type: "FRAME", absoluteBounds: box(0, 0, 40, 40), children: [{
       id: "atomic-icon", name: "Vector icon", type: "VECTOR", renderAs: "image", assetId: "icon", rotation: 90, opacity: 0.5,
-      absoluteBounds: box(10, 10, 20, 20), imagePlacement: box(0, 0, 20, 20),
+      absoluteBounds: box(10, 10, 20, 20), imageBounds: box(7, 6, 26, 28), imagePlacement: box(-3, -4, 26, 28), clipsContent: true,
       fills: [{ type: "SOLID", color: "rgb(0, 0, 0)" }], strokes: [{ type: "SOLID", color: "rgb(255, 255, 255)" }], strokeWeight: 2,
     }] }],
   });
@@ -91,6 +91,13 @@ test("atomic raster assets do not repaint vector fills or strokes on their recta
   assert.equal(wrapperRule.includes("outline"), false);
   assert.equal(wrapperRule.includes("rotate"), false);
   assert.equal(wrapperRule.includes("opacity"), false);
+  assert.match(wrapperRule, /width:26px/);
+  assert.match(wrapperRule, /height:28px/);
+  assert.match(wrapperRule, /margin-left:auto/);
+  assert.match(wrapperRule, /margin-right:auto/);
+  assert.match(wrapperRule, /margin-top:6px/);
+  assert.equal(wrapperRule.includes("overflow:hidden"), false);
+  assert.match(atomic.css, /\.d2c-n-2 > \.d2c-asset \{ left:0px; top:0px; width:26px; height:28px; \}/);
   assert.equal(atomic.manifest.reviewRequired.some(item => item.id === "atomic-icon"), false);
 });
 
@@ -164,6 +171,42 @@ test("rasterized text is an absolute atomic paint layer, not flow content", () =
   assert.match(rule, /position:absolute/);
   assert.match(rule, /top:0px/);
   assert.match(rule, /left:18px/);
+});
+
+test("linear-gradient text remains selectable and uses a text-clipped background", () => {
+  const preview = generatePreview({
+    meta: { schemaVersion: 3, exporterVersion: "3.5.0" }, assets: {},
+    nodes: [{ ...text("currency", "元", 0, 0, "元"), width: 20, height: 23, fills: [{
+      type: "GRADIENT_LINEAR", opacity: 1, visible: true, blendMode: "NORMAL",
+      gradientTransform: [[0, 1, 0], [-1, 0, 1]],
+      gradientStops: [{ position: 0, color: "rgba(255,255,255,1)" }, { position: 1, color: "rgba(255,247,150,1)" }],
+    }], textColor: null }],
+  });
+  assert.match(preview.html, />元<\/div>/);
+  assert.doesNotMatch(preview.html, /data-d2c-asset/);
+  const className = preview.html.match(/class="d2c-node ([^"]+)" data-d2c-id="currency"/)?.[1];
+  const rule = preview.css.match(new RegExp(`\\.${className} \\{([^}]+)\\}`))?.[1] ?? "";
+  assert.match(rule, /background-image:linear-gradient/);
+  assert.match(rule, /background-clip:text/);
+  assert.match(rule, /-webkit-text-fill-color:transparent/);
+});
+
+test("mask source paint stays non-visible while the mask node and following image remain", () => {
+  const preview = generatePreview({
+    meta: { schemaVersion: 3, exporterVersion: "3.5.0" },
+    assets: { image: { id: "image", relativePath: "images/image.png" } },
+    nodes: [{ id: "masked", name: "masked", type: "GROUP", absoluteBounds: box(0, 0, 174, 136), children: [
+      { id: "mask", name: "mask", type: "RECTANGLE", isMask: true, maskType: "ALPHA", absoluteBounds: box(0, 0, 174, 136), fills: [{ type: "SOLID", visible: true, opacity: 1, color: "rgba(217,217,217,1)" }], strokes: [{ type: "SOLID", visible: true, opacity: 1, color: "black" }] },
+      { id: "photo", name: "photo", type: "RECTANGLE", renderAs: "image", assetId: "image", absoluteBounds: box(6, 0, 162, 136), imageBounds: box(6, 0, 162, 136) },
+    ] }],
+  });
+  assert.match(preview.html, /data-d2c-id="mask"/);
+  assert.match(preview.html, /data-d2c-id="photo"/);
+  const maskClass = preview.html.match(/class="d2c-node ([^"]+)" data-d2c-id="mask"/)?.[1];
+  const rule = preview.css.match(new RegExp(`\\.${maskClass} \\{([^}]+)\\}`))?.[1] ?? "";
+  assert.doesNotMatch(rule, /background(?:-color|-image)?:/);
+  assert.doesNotMatch(rule, /outline:/);
+  assert.equal(preview.manifest.placements.find(item => item.id === "mask")?.role, "decoration");
 });
 
 test("rotated overlapping layers use unrotated size and center-based position", () => {

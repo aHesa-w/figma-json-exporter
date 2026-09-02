@@ -4,15 +4,39 @@ import { persistExport, type ExportOptions } from "./assets.js";
 import { exportPen, penStatus } from "./pen.js";
 
 export const SERVER_NAME = "figma-json-exporter";
-export const SERVER_VERSION = "3.12.1";
+export const SERVER_VERSION = "3.15.0";
 export const EXPORT_TIMEOUT_MS = 120_000;
+
+export interface OptimizationGroup {
+  parentId: string;
+  name: string;
+  childIds: string[];
+}
+
+export interface OptimizationRequest {
+  expectedSelectionIds: string[];
+  copyName?: string;
+  spacing?: number;
+  plan: {
+    summary: string;
+    removeInvisible?: boolean;
+    reorderParentIds?: string[];
+    ungroupNodeIds?: string[];
+    groups?: OptimizationGroup[];
+    postGroups?: OptimizationGroup[];
+    rootArchitectureNodeIds?: string[];
+    floatingNodeIds?: string[];
+  };
+}
 
 export interface Exporter {
   status(signal?: AbortSignal, options?: Pick<ExportOptions, "mode" | "penPath">): Promise<Record<string, unknown>>;
   export(signal?: AbortSignal, options?: ExportOptions): Promise<unknown>;
+  optimize(signal: AbortSignal | undefined, request: OptimizationRequest): Promise<unknown>;
 }
 
 interface ExportJob {
+  kind: "export" | "optimize";
   id: string;
   resolve: (data: unknown) => void;
   reject: (error: Error) => void;
@@ -20,24 +44,29 @@ interface ExportJob {
   assets: Map<string, Buffer>;
   assetBytes: number;
   options: ExportOptions;
+  optimization?: OptimizationRequest;
   controller: AbortController;
   completing: boolean;
 }
 
 export class Bridge implements Exporter {
   private plugin?: WebSocket;
+  private pluginVersion?: string;
+  private pluginFeatures = new Set<string>();
   private active?: ExportJob;
   private queue: ExportJob[] = [];
 
   async status(_signal?: AbortSignal, options: Pick<ExportOptions, "mode" | "penPath"> = {}): Promise<Record<string, unknown>> {
     if (options.mode === "pen") return penStatus(options.penPath);
-    return { connected: this.plugin?.readyState === WebSocket.OPEN, mode: "figma", pluginName: "Figma JSON Exporter" };
+    return { connected: this.plugin?.readyState === WebSocket.OPEN, mode: "figma", pluginName: "Figma JSON Exporter", pluginVersion: this.pluginVersion ?? null, features: [...this.pluginFeatures].sort() };
   }
 
   attach(plugin: WebSocket): void {
     const previous = this.plugin;
     // Fail old work before accepting exports on the replacement connection.
     this.plugin = undefined;
+    this.pluginVersion = undefined;
+    this.pluginFeatures.clear();
     this.failAll(new Error("Figma plugin reconnected while an export was running"));
     previous?.terminate();
     this.plugin = plugin;
@@ -51,10 +80,16 @@ export class Bridge implements Exporter {
       if (this.plugin !== plugin) return;
       let msg;
       try { msg = JSON.parse(raw.toString()); } catch { return; }
+      if (msg?.type === "hello") {
+        this.pluginVersion = typeof msg.pluginVersion === "string" ? msg.pluginVersion : undefined;
+        this.pluginFeatures = new Set(Array.isArray(msg.features) ? msg.features.filter((feature: unknown): feature is string => typeof feature === "string" && feature.length <= 80) : []);
+        plugin.send(JSON.stringify({ type: "hello-ack", serverVersion: SERVER_VERSION }));
+        return;
+      }
       if (!msg || msg.requestId !== this.active?.id) return;
       const job = this.active!;
       if (job.completing) return;
-      if (msg.type === "image") {
+      if (msg.type === "image" && job.kind === "export") {
         if (typeof msg.hash !== "string" || !msg.hash || !Array.isArray(msg.bytes) || msg.bytes.length > 32 * 1024 * 1024 || !msg.bytes.every((n: unknown) => typeof n === "number" && Number.isInteger(n) && n >= 0 && n <= 255)) {
           this.finish(new Error("Invalid image payload"));
           return;
@@ -65,7 +100,7 @@ export class Bridge implements Exporter {
         job.assets.set(msg.hash, Buffer.from(msg.bytes));
         return;
       }
-      if (msg.type === "done") {
+      if (msg.type === "done" && job.kind === "export") {
         if (!msg.data || !Array.isArray(msg.data.nodes)) {
           this.finish(new Error("Figma plugin returned invalid export data"));
         } else {
@@ -75,6 +110,10 @@ export class Bridge implements Exporter {
             (error) => { if (this.active === job) this.finish(error); },
           );
         }
+      } else if (msg.type === "optimized" && job.kind === "optimize") {
+        if (!msg.data || msg.data.status !== "optimized" || !Array.isArray(msg.data.optimizedRootIds) || !Array.isArray(msg.data.createdNodeIds) || !Array.isArray(msg.data.mutatedNodeIds)) {
+          this.finish(new Error("Figma plugin returned invalid optimization data"));
+        } else this.finish(undefined, msg.data);
       } else if (msg.type === "error") {
         this.finish(new Error(String(msg.message || "Figma export failed")));
       }
@@ -99,13 +138,37 @@ export class Bridge implements Exporter {
       const abort = () => cancel(new Error("Export cancelled"));
       const timer = setTimeout(() => cancel(new Error("Export timed out (120s)")), EXPORT_TIMEOUT_MS);
       const job: ExportJob = {
-        id: randomUUID(), resolve, reject,
+        id: randomUUID(), kind: "export", resolve, reject,
         options, assets: new Map(), assetBytes: 0, controller: new AbortController(), completing: false,
         cleanup: () => { clearTimeout(timer); signal?.removeEventListener("abort", abort); },
       };
       signal?.addEventListener("abort", abort, { once: true });
       this.queue.push(job);
       this.pump();
+    });
+  }
+
+  optimize(signal: AbortSignal | undefined, request: OptimizationRequest): Promise<unknown> {
+    return new Promise((resolve, reject) => {
+      if (signal?.aborted) return reject(new Error("Optimization cancelled"));
+      if (this.plugin?.readyState !== WebSocket.OPEN) return reject(new Error("Figma plugin is not connected; open Figma and run JSON Exporter"));
+      if (!this.pluginFeatures.has("optimize-v1") || !this.pluginFeatures.has("structure-font-fallback-v1") || !this.pluginFeatures.has("layers-panel-order-v1") || !this.pluginFeatures.has("clip-pruning-v1") || !this.pluginFeatures.has("architecture-post-groups-v1") || !this.pluginFeatures.has("root-architecture-floating-v1")) return reject(new Error("The connected Figma plugin does not support the current safe node-optimization protocol; close and reopen the development plugin, then retry"));
+      const cancel = (error: Error) => {
+        if (this.active === job) this.finish(error);
+        else {
+          this.queue = this.queue.filter((queued) => queued !== job);
+          job.cleanup(); reject(error);
+        }
+      };
+      const abort = () => cancel(new Error("Optimization cancelled"));
+      const timer = setTimeout(() => cancel(new Error("Optimization timed out (120s)")), EXPORT_TIMEOUT_MS);
+      const job: ExportJob = {
+        id: randomUUID(), kind: "optimize", resolve, reject,
+        options: {}, optimization: request, assets: new Map(), assetBytes: 0, controller: new AbortController(), completing: false,
+        cleanup: () => { clearTimeout(timer); signal?.removeEventListener("abort", abort); },
+      };
+      signal?.addEventListener("abort", abort, { once: true });
+      this.queue.push(job); this.pump();
     });
   }
 
@@ -117,7 +180,10 @@ export class Bridge implements Exporter {
     }
     const job = this.queue.shift()!;
     this.active = job;
-    this.plugin.send(JSON.stringify({ type: "export", requestId: job.id, shapeGroupsAsImages: job.options.shapeGroupsAsImages !== false }), (error) => {
+    const message = job.kind === "export"
+      ? { type: "export", requestId: job.id, shapeGroupsAsImages: job.options.shapeGroupsAsImages !== false }
+      : { type: "optimize", requestId: job.id, request: job.optimization };
+    this.plugin.send(JSON.stringify(message), (error) => {
       if (error && this.active === job) this.finish(error);
     });
   }
@@ -142,6 +208,8 @@ export class Bridge implements Exporter {
   close(): void {
     const plugin = this.plugin;
     this.plugin = undefined;
+    this.pluginVersion = undefined;
+    this.pluginFeatures.clear();
     this.failAll(new Error("Figma MCP server is shutting down"));
     plugin?.terminate();
   }
@@ -150,7 +218,7 @@ export class Bridge implements Exporter {
 export class HTTPExporter implements Exporter {
   constructor(private readonly baseURL: string) {}
 
-  private async request(path: string, signal?: AbortSignal, options?: ExportOptions): Promise<any> {
+  private async request(path: string, signal?: AbortSignal, options?: unknown): Promise<any> {
     const timeout = AbortSignal.timeout(EXPORT_TIMEOUT_MS + 5_000);
     const response = await fetch(this.baseURL + path, {
       signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
@@ -171,6 +239,12 @@ export class HTTPExporter implements Exporter {
   async export(signal?: AbortSignal, options: ExportOptions = {}): Promise<unknown> {
     const data = await this.request("/export", signal, options);
     if (!data || !Array.isArray(data.nodes)) throw new Error("Bridge returned invalid export data");
+    return data;
+  }
+
+  async optimize(signal: AbortSignal | undefined, request: OptimizationRequest): Promise<unknown> {
+    const data = await this.request("/optimize", signal, request);
+    if (!data || data.status !== "optimized" || !Array.isArray(data.optimizedRootIds)) throw new Error("Bridge returned invalid optimization data");
     return data;
   }
 }

@@ -1,7 +1,7 @@
 import { createServer, type ServerResponse } from "node:http";
 import { WebSocketServer } from "ws";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
-import { Bridge, SERVER_NAME, SERVER_VERSION } from "./bridge.js";
+import { Bridge, SERVER_NAME, SERVER_VERSION, type OptimizationRequest } from "./bridge.js";
 import { createMCPServer } from "./mcp.js";
 import type { ExportOptions } from "./assets.js";
 import { isAbsolute } from "node:path";
@@ -48,8 +48,8 @@ export async function startServer(host: string, port: number) {
         setTimeout(() => void close(), 50);
         return;
       }
-      if (!["/health", "/status", "/export"].includes(path)) { json(res, 404, { error: "Not found" }); return; }
-      const methods = path === "/export" ? ["GET", "POST"] : ["GET"];
+      if (!["/health", "/status", "/export", "/optimize"].includes(path)) { json(res, 404, { error: "Not found" }); return; }
+      const methods = path === "/export" ? ["GET", "POST"] : path === "/optimize" ? ["POST"] : ["GET"];
       if (!methods.includes(req.method || "")) { res.setHeader("Allow", methods.join(", ")); json(res, 405, { error: "Method not allowed" }); return; }
       if (path === "/health") json(res, 200, { status: "ok", name: SERVER_NAME, version: SERVER_VERSION });
       else if (path === "/status") {
@@ -57,7 +57,7 @@ export async function startServer(host: string, port: number) {
         if (!['figma', 'pen'].includes(mode)) throw new Error("mode must be figma or pen");
         json(res, 200, await bridge.status(undefined, { mode: mode as "figma" | "pen", penPath: target.searchParams.get("penPath") ?? undefined }));
       }
-      else {
+      else if (path === "/export") {
         const controller = new AbortController();
         res.on("close", () => controller.abort());
         let options: ExportOptions = {};
@@ -83,6 +83,33 @@ export async function startServer(host: string, port: number) {
           if (options.mode === "pen" && !options.penPath) throw new Error("mode=pen requires penPath");
         }
         json(res, 200, await bridge.export(controller.signal, options));
+      }
+      else {
+        const controller = new AbortController();
+        res.on("close", () => controller.abort());
+        const chunks: Buffer[] = [];
+        let byteLength = 0;
+        for await (const chunk of req) {
+          byteLength += chunk.length;
+          if (byteLength > 1024 * 1024) throw new Error("Optimization request exceeds 1MB");
+          chunks.push(chunk);
+        }
+        const body = Buffer.concat(chunks).toString("utf8");
+        const request = (body ? JSON.parse(body) : null) as OptimizationRequest | null;
+        const plan = request?.plan;
+        const strings = (value: unknown, max: number) => Array.isArray(value) && value.length <= max && value.every(item => typeof item === "string" && item.length > 0 && item.length <= 256);
+        if (!request || typeof request !== "object" || !strings(request.expectedSelectionIds, 20)
+          || typeof plan !== "object" || !plan || typeof plan.summary !== "string" || plan.summary.trim().length < 20 || plan.summary.length > 2000
+          || (request.copyName !== undefined && (typeof request.copyName !== "string" || !request.copyName.trim() || request.copyName.length > 80))
+          || (request.spacing !== undefined && (!Number.isFinite(request.spacing) || request.spacing! < 40 || request.spacing! > 5000))
+          || (plan.removeInvisible !== undefined && typeof plan.removeInvisible !== "boolean")
+          || (plan.reorderParentIds !== undefined && !strings(plan.reorderParentIds, 200))
+          || (plan.ungroupNodeIds !== undefined && !strings(plan.ungroupNodeIds, 200))
+          || (plan.rootArchitectureNodeIds !== undefined && !strings(plan.rootArchitectureNodeIds, 100))
+          || (plan.floatingNodeIds !== undefined && !strings(plan.floatingNodeIds, 100))
+          || (plan.groups !== undefined && (!Array.isArray(plan.groups) || plan.groups.length > 100 || !plan.groups.every(group => group && typeof group.parentId === "string" && group.parentId && typeof group.name === "string" && group.name.trim() && group.name.length <= 80 && strings(group.childIds, 50) && group.childIds.length >= 2)))) throw new Error("Invalid optimization request");
+        if (plan.postGroups !== undefined && (!Array.isArray(plan.postGroups) || plan.postGroups.length > 100 || !plan.postGroups.every(group => group && typeof group.parentId === "string" && group.parentId && typeof group.name === "string" && group.name.trim() && group.name.length <= 80 && strings(group.childIds, 50) && group.childIds.length >= 2))) throw new Error("Invalid optimization request");
+        json(res, 200, await bridge.optimize(controller.signal, request));
       }
     } catch (error) {
       if (res.headersSent || res.destroyed) return;

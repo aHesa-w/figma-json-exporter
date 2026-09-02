@@ -52,6 +52,147 @@ test("an empty selection keeps the existing actionable error", async () => {
   assert.match(result.message, /请先选中/);
 });
 
+test("model-planned optimization creates a separate DOM-ordered copy and never mutates the source", async () => {
+  const root = node("root", { width: 300, height: 300, children: [
+    node("background", { type: "RECTANGLE", name: "Background", x: 0, y: 0, width: 300, height: 300 }),
+    node("hidden", { visible: false, x: 0, y: 0, width: 10, height: 10 }),
+    node("lower", { x: 0, y: 120, width: 60, height: 40 }),
+    node("left", { x: 0, y: 20, width: 60, height: 40 }),
+    node("right", { x: 100, y: 20, width: 60, height: 40 }),
+    node("redundant", { type: "GROUP", x: 0, y: 200, width: 100, height: 40, children: [node("note", { x: 0, y: 200, width: 100, height: 40 })] }),
+  ] });
+  const originalOrder = root.children.map(child => child.id);
+  const fixture = pluginFixture([root]);
+  const result = await fixture.optimize("optimize-1", {
+    expectedSelectionIds: ["root"], copyName: "DOM优化", spacing: 200,
+    plan: {
+      summary: "Remove invisible layers, normalize visual reading order, dissolve the redundant wrapper and group the related top-row actions.",
+      removeInvisible: true,
+      reorderParentIds: ["root"],
+      ungroupNodeIds: ["redundant"],
+      groups: [{ parentId: "root", name: "Top actions", childIds: ["left", "right"] }],
+    },
+  });
+  assert.equal(result.type, "optimized");
+  assert.equal(result.data.status, "optimized");
+  assert.deepEqual(root.children.map(child => child.id), originalOrder);
+  assert.deepEqual(result.data.removedInvisibleSourceNodeIds, ["hidden"]);
+  assert.deepEqual(result.data.reorderedParentSourceIds, ["root"]);
+  assert.deepEqual(result.data.ungroupedSourceNodeIds, ["redundant"]);
+  assert.equal(result.data.createdGroups[0].name, "Top actions");
+  assert.equal(result.data.createdNodeIds.includes(result.data.optimizedRootIds[0]), true);
+  assert.equal(result.data.mutatedNodeIds.includes(result.data.optimizedRootIds[0]), true);
+  assert.equal(fixture.context.figma.currentPage.selection[0].id, result.data.optimizedRootIds[0]);
+  const optimized = fixture.context.figma.currentPage.selection[0];
+  assert.equal(optimized.name, "root · DOM优化");
+  assert.equal(optimized.children.some(child => child.name === "hidden"), false);
+  assert.equal(optimized.children.some(child => child.name === "redundant"), false);
+  assert.equal(optimized.children.some(child => child.name === "Top actions"), true);
+  assert.deepEqual(optimized.children.slice().reverse().filter(child => child.name !== "Background").map(child => child.name), ["Top actions", "lower", "note"]);
+});
+
+test("optimization removes fully clipped siblings and orders the Layers panel in visual reading order", async () => {
+  const root = node("clipped-root", { width: 300, height: 300, clipsContent: true, children: [
+    node("background", { type: "RECTANGLE", name: "Background", x: 0, y: 0, width: 300, height: 300 }),
+    node("top-left", { x: 20, y: 20, width: 80, height: 40 }),
+    node("bottom", { x: 20, y: 180, width: 80, height: 40 }),
+    node("top-right", { x: 150, y: 20, width: 80, height: 40 }),
+    node("off-canvas-status", { name: "状态栏", x: 500, y: 0, width: 300, height: 80 }),
+  ] });
+  const fixture = pluginFixture([root]);
+  const result = await fixture.optimize("clip-and-order", {
+    expectedSelectionIds: ["clipped-root"],
+    plan: { summary: "Remove clipped-out state layers and make the Layers panel follow visual reading order.", removeInvisible: true, reorderParentIds: ["clipped-root"] },
+  });
+  assert.equal(result.type, "optimized");
+  assert.deepEqual(result.data.removedInvisibleSourceNodeIds, ["off-canvas-status"]);
+  assert.deepEqual(result.data.reorderedParentSourceIds, ["clipped-root"]);
+  const optimized = fixture.context.figma.currentPage.selection[0];
+  assert.deepEqual(optimized.children.slice().reverse().map(child => child.name), ["top-left", "top-right", "bottom", "Background"]);
+});
+
+test("optimization can wrap architecture members only after ordering makes them contiguous", async () => {
+  const root = node("architecture-root", { width: 300, height: 300, children: [
+    node("section", { x: 0, y: 100, width: 100, height: 40 }),
+    node("row-right", { x: 150, y: 20, width: 80, height: 40 }),
+    node("row-left", { x: 20, y: 20, width: 80, height: 40 }),
+    node("bottom", { x: 0, y: 220, width: 100, height: 40 }),
+  ] });
+  const fixture = pluginFixture([root]);
+  const result = await fixture.optimize("architecture-post-group", {
+    expectedSelectionIds: ["architecture-root"],
+    plan: {
+      summary: "Create the row architecture first, order top-level anchors, then safely wrap the section with its bottom layer.",
+      reorderParentIds: ["architecture-root"],
+      groups: [{ parentId: "architecture-root", name: "Top row", childIds: ["row-right", "row-left"] }],
+      postGroups: [{ parentId: "architecture-root", name: "Section with bottom", childIds: ["section", "bottom"] }],
+    },
+  });
+  assert.equal(result.type, "optimized");
+  assert.deepEqual(result.data.createdGroups.map(group => [group.name, group.stage]), [["Top row", "architecture-first"], ["Section with bottom", "post-order"]]);
+  const optimized = fixture.context.figma.currentPage.selection[0];
+  assert.deepEqual(optimized.children.slice().reverse().map(child => child.name), ["Top row", "Section with bottom"]);
+});
+
+test("page skeleton and floating overlays stay direct while content can regroup after ungroup", async () => {
+  const root = node("page-root", { width: 300, height: 500, children: [
+    node("main-wrapper", { type: "GROUP", children: [
+      node("main-background", { x: 0, y: 100, width: 300, height: 250 }),
+      node("main-content", { x: 20, y: 120, width: 260, height: 180 }),
+      node("collapse", { x: 250, y: 90, width: 40, height: 40 }),
+    ] }),
+    node("footer", { x: 0, y: 450, width: 300, height: 50 }),
+    node("header", { x: 0, y: 0, width: 300, height: 60 }),
+  ] });
+  const fixture = pluginFixture([root]);
+  const result = await fixture.optimize("root-architecture", {
+    expectedSelectionIds: ["page-root"],
+    plan: {
+      summary: "Keep header and footer as page-skeleton roots, leave collapse as a floating overlay, and regroup only the actual main content.",
+      reorderParentIds: ["page-root"],
+      ungroupNodeIds: ["main-wrapper"],
+      groups: [{ parentId: "page-root", name: "Main content", childIds: ["main-background", "main-content"] }],
+      rootArchitectureNodeIds: ["header", "footer"],
+      floatingNodeIds: ["collapse"],
+    },
+  });
+  assert.equal(result.type, "optimized");
+  assert.deepEqual(result.data.rootArchitectureSourceNodeIds, ["header", "footer"]);
+  assert.deepEqual(result.data.floatingSourceNodeIds, ["collapse"]);
+  const optimized = fixture.context.figma.currentPage.selection[0];
+  for (const name of ["header", "footer", "collapse", "Main content"]) assert.equal(optimized.children.some(child => child.name === name), true);
+  assert.equal(optimized.children.at(-1).name, "collapse");
+});
+
+test("optimization rejects stale selections, masks and non-contiguous grouping before creating a copy", async () => {
+  const root = node("safe-root", { children: [
+    node("first"), node("mask", { isMask: true }), node("middle"), node("last"),
+  ] });
+  for (const request of [
+    { expectedSelectionIds: ["stale-root"], plan: { summary: "Reject a model plan generated from a different live Figma selection." } },
+    { expectedSelectionIds: ["safe-root"], plan: { summary: "Reject automatic reordering when a mask participates in the sibling paint sequence.", reorderParentIds: ["safe-root"] } },
+    { expectedSelectionIds: ["safe-root"], plan: { summary: "Reject grouping non-contiguous siblings because that can silently alter paint order.", groups: [{ parentId: "safe-root", name: "Unsafe group", childIds: ["first", "last"] }] } },
+  ]) {
+    const fixture = pluginFixture([root]);
+    const result = await fixture.optimize("invalid-plan", request);
+    assert.equal(result.type, "error");
+    assert.equal(fixture.context.figma.currentPage.children.length, 1);
+    assert.equal(fixture.context.figma.currentPage.children[0], root);
+  }
+});
+
+test("unavailable fonts are reported but do not block structure-only copied optimization", async () => {
+  const fixture = pluginFixture([node("root-with-text", { children: [node("label", { type: "TEXT", characters: "Label" })] })], { unavailableFont: true });
+  const result = await fixture.optimize("font-warning", {
+    expectedSelectionIds: ["root-with-text"],
+    plan: { summary: "Create a copied hierarchy without modifying any text property despite unavailable fonts." },
+  });
+  assert.equal(result.type, "optimized");
+  assert.equal(result.data.warnings[0].type, "unavailable-fonts");
+  assert.deepEqual(result.data.warnings[0].fonts, ["Arial Regular"]);
+  assert.equal(result.data.optimizedRootIds.length, 1);
+});
+
 test("sync and async serializers agree and missing visibility properties are retained", async () => {
   const fixture = pluginFixture([]);
   const root = node("root", { children: [node("hide", { visible: false }), node("zero", { opacity: 0 }), { id: "minimal", type: "RECTANGLE" }] });
@@ -131,6 +272,21 @@ test("pure shape groups and boolean operations become atomic image layers", asyn
   assert.ok(fixture.frames.every(frame => frame.removed && frame.children[0].removed));
   assert.equal(result.imageCount, 2);
   assert.equal(result.data.assets[icon.assetId].kind, "shape");
+});
+
+test("image paints are content and prevent their ancestor group from collapsing as a pure shape", async () => {
+  const imagePaint = { type: "IMAGE", imageHash: "photo", scaleMode: "FILL" };
+  const group = node("mixed-media", { type: "GROUP", children: [
+    node("photo", { type: "RECTANGLE", fills: [imagePaint] }),
+    node("vector", { type: "VECTOR" }),
+  ] });
+  const result = await pluginFixture([group]).request("image-is-not-shape");
+  assert.equal(result.type, "done", result.message);
+  assert.equal(result.data.nodes[0].renderAs, undefined);
+  assert.equal(result.data.nodes[0].children.length, 2);
+  assert.equal(result.data.nodes[0].children[0].rasterReason, "image-paint");
+  assert.equal(result.data.nodes[0].children[1].rasterReason, "composite-shape");
+  assert.equal(result.data.assets.photo.kind, "image-fill");
 });
 
 test("shape collapsing can be disabled and selected descendants are not duplicated", async () => {

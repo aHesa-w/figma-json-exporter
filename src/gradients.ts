@@ -130,6 +130,7 @@ export function validateGradient(node: Layer, style: RenderStyle | undefined): P
     const found = actual.stops[i];
     if (Math.abs(stop.position - found.position) > 0.001 || Math.abs(stop.color[3] - found.color[3]) > 0.001 || (stop.color[3] > 0 && stop.color.slice(0, 3).some((v, j) => Math.abs(v - found.color[j]) > 1 / 255 + 1e-6))) fail(`gradient-stops[${i}]`, stop, found);
   });
-  if (style?.backgroundOrigin !== "border-box" || style.backgroundClip !== "border-box" || !["auto", "auto auto", "100% 100%"].includes(style.backgroundSize ?? "") || !["0% 0%", "0px 0px"].includes(style.backgroundPosition ?? "")) fail("gradient-paint-box", "Use border-box origin/clip, full-box background-size and 0% 0% position", style);
+  const expectedClip = node.type === "TEXT" ? "text" : "border-box";
+  if (style?.backgroundOrigin !== "border-box" || style.backgroundClip !== expectedClip || !["auto", "auto auto", "100% 100%"].includes(style.backgroundSize ?? "") || !["0% 0%", "0px 0px"].includes(style.backgroundPosition ?? "")) fail("gradient-paint-box", `Use border-box origin, ${expectedClip} clip, full-box background-size and 0% 0% position`, style);
   return issues;
 }

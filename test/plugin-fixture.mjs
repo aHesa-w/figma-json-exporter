@@ -19,8 +19,25 @@ export function png(width, height) {
 // Synthetic browser style samples for protocol/unit tests, not visual evidence.
 export const flowStyle = (overrides = {}) => ({ display: "block", position: "relative", cssFloat: "none", insets: Array(4).fill("auto"), margins: Array(4).fill("0px"), transform: "none", translate: "none", wrappers: [], ...overrides });
 export const renderStyle = (overrides = {}) => ({ opacity: 1, position: "relative", overflowX: "visible", overflowY: "visible", clipPath: "none", maskImage: "none", contain: "none", borderBoxWidth: 100, borderBoxHeight: 100, cornerRadii: ["0px", "0px", "0px", "0px"], wrapperEffects: [], ...overrides });
+let cloneSerial = 0;
+function attachNode(node, parent) {
+  if (arguments.length > 1) node.parent = parent;
+  node.removed ??= false;
+  node.appendChild ??= function(child) { this.insertChild((this.children ??= []).length, child); };
+  node.insertChild ??= function(index, child) {
+    if (!Array.isArray(this.children)) this.children = [];
+    if (child.parent?.children) child.parent.children = child.parent.children.filter(item => item !== child);
+    this.children.splice(index, 0, child); child.parent = this;
+  };
+  node.remove ??= function() {
+    if (this.parent?.children && !this.parent.retainRemovedChildren) this.parent.children = this.parent.children.filter(item => item !== this);
+    this.removed = true; this.parent = null;
+  };
+  for (const child of node.children ?? []) attachNode(child, node);
+  return node;
+}
 export function node(id, properties = {}) {
-  return { id, name: id, type: "FRAME", visible: true, opacity: 1, x: 0, y: 0, width: 100, height: 100,
+  const value = { id, name: id, type: "FRAME", visible: true, opacity: 1, x: 0, y: 0, width: 100, height: 100,
     ...(properties.type === "TEXT" ? { fills: [{ type: "SOLID", color: { r: 0, g: 0, b: 0 } }], fontName: { family: "Arial", style: "Regular" }, fontSize: 16, letterSpacing: { unit: "PIXELS", value: 0 }, textDecoration: "NONE", lineHeight: { unit: "PIXELS", value: 16 } } : {}),
     get absoluteTransform() { return [[1, 0, this.x], [0, 1, this.y]]; },
     get absoluteRenderBounds() {
@@ -30,8 +47,17 @@ export function node(id, properties = {}) {
       const xs = points.map(p => p[0]), ys = points.map(p => p[1]);
       return { x: Math.min(...xs), y: Math.min(...ys), width: Math.max(...xs) - Math.min(...xs), height: Math.max(...ys) - Math.min(...ys) };
     },
-    clone() { return { ...this, removed: false, remove() { this.removed = true; } }; },
+    clone() {
+      const copied = {};
+      for (const key of Object.keys(this)) {
+        if (["id", "parent", "removed", "children", "clone", "appendChild", "insertChild", "remove"].includes(key) || typeof this[key] === "function") continue;
+        copied[key] = this[key];
+      }
+      copied.children = (this.children ?? []).map(child => child.clone());
+      return node(`${this.id}-copy-${++cloneSerial}`, copied);
+    },
     async exportAsync() { const b = this.absoluteBoundingBox ?? this.absoluteRenderBounds; return new Uint8Array(png(Math.ceil(b.width * 2), Math.ceil(b.height * 2))); }, ...properties };
+  return attachNode(value);
 }
 
 // Model a node culled by its original ancestor, readable only after reparenting
@@ -55,18 +81,42 @@ export function pluginFixture(selection, options = {}) {
   const messages = [];
   let complete;
   const frames = [];
+  const pageRoots = [];
+  for (const selected of selection) {
+    let root = selected;
+    while (root.parent && root.parent.type !== "PAGE") root = root.parent;
+    if (!pageRoots.includes(root)) pageRoots.push(root);
+  }
+  const currentPage = attachNode({ id: "page", name: "Page", type: "PAGE", children: pageRoots, selection: [...selection] });
   const figma = {
     root: { documentColorProfile: options.documentColorProfile ?? "SRGB" },
     variables: { async getVariableCollectionByIdAsync(id) { return options.missingVariableCollection ? null : { id }; } },
-    mixed: Symbol("mixed"), showUI() {}, closePlugin() {},
-    currentPage: { selection },
+    mixed: Symbol("mixed"), showUI() {}, closePlugin() {}, async loadFontAsync(font) { if (options.unavailableFont) throw new Error(`Unavailable font ${font.family}`); }, commitUndo() { this.undoCommits = (this.undoCommits ?? 0) + 1; },
+    currentPage,
+    viewport: { scrollAndZoomIntoView(nodes) { this.lastNodes = nodes; } },
+    group(nodes, parent, index = parent.children.length) {
+      const bounds = nodes.reduce((box, child) => ({
+        left: Math.min(box.left, child.x), top: Math.min(box.top, child.y),
+        right: Math.max(box.right, child.x + child.width), bottom: Math.max(box.bottom, child.y + child.height),
+      }), { left: Infinity, top: Infinity, right: -Infinity, bottom: -Infinity });
+      const group = node(`group-copy-${++cloneSerial}`, { name: "Group", type: "GROUP", x: bounds.left, y: bounds.top, width: bounds.right - bounds.left, height: bounds.bottom - bounds.top, children: [] });
+      parent.insertChild(index, group);
+      for (const child of nodes) group.appendChild(child);
+      return group;
+    },
+    ungroup(group) {
+      const parent = group.parent, index = parent.children.indexOf(group), children = [...group.children];
+      group.children = []; group.remove();
+      for (let i = 0; i < children.length; i++) parent.insertChild(index + i, children[i]);
+      return children;
+    },
     createFrame() {
-      const frame = { removed: false, children: [], modes: {}, setExplicitVariableModeForCollection(collection, mode) { this.modes[collection.id] = mode; }, resizeWithoutConstraints(w, h) { this.width = w; this.height = h; }, appendChild(child) { this.children.push(child); child.parent = this; }, remove() { this.removed = true; }, async exportAsync(settings) { this.settings = settings; return options.frameExport ? options.frameExport(this) : new Uint8Array(png(Math.ceil(this.width * 2), Math.ceil(this.height * 2))); } };
+      const frame = { removed: false, retainRemovedChildren: true, children: [], modes: {}, setExplicitVariableModeForCollection(collection, mode) { this.modes[collection.id] = mode; }, resizeWithoutConstraints(w, h) { this.width = w; this.height = h; }, appendChild(child) { this.children.push(child); child.parent = this; }, remove() { this.removed = true; }, async exportAsync(settings) { this.settings = settings; return options.frameExport ? options.frameExport(this) : new Uint8Array(png(Math.ceil(this.width * 2), Math.ceil(this.height * 2))); } };
       frames.push(frame); return frame;
     },
     ui: { postMessage(msg) {
       messages.push(msg);
-      if (msg.type === "done" || msg.type === "error") complete?.(msg);
+      if (msg.type === "done" || msg.type === "optimized" || msg.type === "error") complete?.(msg);
     } },
     getImageByHash(hash) {
       imageReads.push(hash);
@@ -81,6 +131,12 @@ export function pluginFixture(selection, options = {}) {
       return new Promise((resolve, reject) => {
         complete = (message) => resolve(JSON.parse(JSON.stringify(message)));
         figma.ui.onmessage({ type: "export", requestId, ...options }).catch(reject);
+      });
+    },
+    optimize(requestId, request) {
+      return new Promise((resolve, reject) => {
+        complete = (message) => resolve(JSON.parse(JSON.stringify(message)));
+        figma.ui.onmessage({ type: "optimize", requestId, request }).catch(reject);
       });
     },
   };

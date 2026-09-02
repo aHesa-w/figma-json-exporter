@@ -187,10 +187,13 @@ test("image layout and expanded paint bounds are independent and neither can be 
   Object.assign(child, { renderAs: "image", assetId: "raster", imageBounds: { x: 406.75, y: -14.25, width: 28, height: 38 } });
   d.assets.raster = { relativePath: "images/raster.png", opacityBaked: true, pixelWidth: 56, pixelHeight: 76 };
   Object.assign(a.nodes[1], { tagName: "DIV", assetImages: [{ assetId: "raster", src: "/images/raster.png", bounds: { x: 6.5, y: 6.25, width: 28, height: 38 }, naturalWidth: 56, naturalHeight: 76, opacity: 1, objectFit: "fill" }] });
+  Object.assign(a.nodes[1].bounds, { x: 6.5, y: 6.25, width: 28, height: 38 });
   const normalized = prepareDesign(d).nodes[0].children[0];
   assert.equal(normalized.imagePlacement.x, -4);
   assert.equal(normalized.relativeBounds.width, 20);
-  assert.equal(validateLayout(d, a).passed, true);
+  const valid = validateLayout(d, a);
+  assert.equal(valid.passed, true);
+  assert.equal(valid.layers[1].expected.width, 28);
   for (const change of [
     n => n.assetImages[0].bounds.x += 4,
     n => n.assetImages[0].bounds.width = 20,

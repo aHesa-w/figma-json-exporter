@@ -143,7 +143,7 @@ function contentFlow(children: Layer[]): Exclude<PreviewPrimitive, "layered-flow
 }
 
 function alignment(child: Layer, parent: Layer): PlacementDecision["alignment"] {
-  const box = child.localBounds, width = parent.absoluteBounds.width;
+  const box = previewLocalBounds(child), width = parent.absoluteBounds.width;
   const tolerance = Math.max(1, width * 0.005);
   const errors = {
     left: Math.abs(box.x),
@@ -165,12 +165,31 @@ interface Placement {
   rotation: number;
 }
 
+// Atomic raster nodes use the exported visual canvas as their DOM box. The
+// layout box remains available in design.json, but using it as the wrapper
+// would either crop negative imagePlacement offsets or leave a smaller,
+// misleading hit/validation box around a larger PNG.
+function previewLocalBounds(node: Layer): Rect {
+  const image = node.renderAs === "image" ? node.imagePlacement : null;
+  if (!image) return node.localBounds;
+  return {
+    x: node.localBounds.x + image.x,
+    y: node.localBounds.y + image.y,
+    width: image.width,
+    height: image.height,
+    left: node.localBounds.left + image.x,
+    top: node.localBounds.top + image.y,
+    right: node.localBounds.left + image.x + image.width,
+    bottom: node.localBounds.top + image.y + image.height,
+  };
+}
+
 // A rotated layer's exported absoluteBounds is its axis-aligned bounding box, which
 // is wider/taller than its unrotated width/height. Position the element by its
 // center so `rotate` (around the default center origin) lands the box correctly.
 function placementCSS(node: Layer, parent: Layer | null, placement: Placement): string[] {
   if (!parent || !placement.primitive) return [];
-  const box = node.localBounds;
+  const box = previewLocalBounds(node);
   const nodeWidth = typeof node.width === "number" ? node.width : null;
   const nodeHeight = typeof node.height === "number" ? node.height : null;
   const rotated = placement.rotation !== 0 && nodeWidth !== null && nodeHeight !== null;
@@ -180,14 +199,14 @@ function placementCSS(node: Layer, parent: Layer | null, placement: Placement): 
     return ["position:absolute", `left:${px(left)}`, `top:${px(top)}`];
   }
   if (placement.inRow) {
-    const previousRight = placement.previous ? placement.previous.localBounds.x + placement.previous.localBounds.width : 0;
+    const previousRight = placement.previous ? previewLocalBounds(placement.previous).right : 0;
     return ["display:inline-block", `margin-left:${px(Math.max(0, box.x - previousRight))}`, `margin-top:${px(Math.max(0, box.y - placement.rowTop))}`, "vertical-align:top"];
   }
   if (placement.primitive === "inline-flow" || placement.primitive === "flex-row") {
-    const previousRight = placement.previous ? placement.previous.localBounds.x + placement.previous.localBounds.width : 0;
+    const previousRight = placement.previous ? previewLocalBounds(placement.previous).right : 0;
     return [placement.primitive === "inline-flow" ? "display:inline-block" : "flex:none", `margin-left:${px(Math.max(0, box.x - previousRight))}`, `margin-top:${px(Math.max(0, box.y))}`, "vertical-align:top"];
   }
-  const previousBottom = placement.previous ? placement.previous.localBounds.y + placement.previous.localBounds.height : 0;
+  const previousBottom = placement.previous ? previewLocalBounds(placement.previous).bottom : 0;
   const rules = [`margin-top:${px(Math.max(0, box.y - previousBottom))}`];
   if (placement.align === "center") rules.push("margin-left:auto", "margin-right:auto");
   else if (placement.align === "right") rules.push("margin-left:auto");
@@ -198,12 +217,16 @@ function placementCSS(node: Layer, parent: Layer | null, placement: Placement): 
 
 function paintCSS(node: Layer, design: Design): string[] {
   const rules: string[] = [];
+  // A Figma mask node contributes alpha/luminance to the following siblings;
+  // its own fill/stroke/effects are not independently visible in the composed
+  // design. Keep the node and relationship metadata, but never render the mask
+  // source as a standalone color block in the deterministic preview.
+  if (node.isMask) return rules;
   // Atomic raster assets already contain their real vector/path silhouette, paints,
   // strokes, effects and rotation. Re-applying those properties to the wrapper
   // turns the axis-aligned bounds into visible black/white blocks or rectangular
   // outlines around icons and charts.
   if (node.renderAs === "image") {
-    if (node.clipsContent) rules.push("overflow:hidden");
     return rules;
   }
   const fills = visiblePaints(node, "fills");
@@ -212,7 +235,19 @@ function paintCSS(node: Layer, design: Design): string[] {
   const gradient = record(node.gradient);
   if (node.type === "TEXT") {
     const color = record(node.textColor)?.css ?? solid?.color;
-    if (typeof color === "string") rules.push(`color:${color}`);
+    if (typeof gradient?.css === "string") {
+      rules.push(
+        `background-image:${gradient.css}`,
+        `background-origin:${String(gradient.backgroundOrigin ?? "border-box")}`,
+        "background-clip:text",
+        "-webkit-background-clip:text",
+        `background-size:${String(gradient.backgroundSize ?? "100% 100%")}`,
+        `background-position:${String(gradient.backgroundPosition ?? "0% 0%")}`,
+        "background-repeat:no-repeat",
+        "color:transparent",
+        "-webkit-text-fill-color:transparent",
+      );
+    } else if (typeof color === "string") rules.push(`color:${color}`);
   } else if (typeof gradient?.css === "string") rules.push(`background-image:${gradient.css}`);
   else if (image) {
     const asset = design.assets[String(image.imageHash)];
@@ -304,7 +339,7 @@ export function generatePreview(input: unknown): PreviewBundle {
     for (const child of ordered) {
       const atomicPaintLayer = primitive === "layered-flow" && child.renderAs === "image";
       const smallVisualLayer = primitive === "layered-flow" && isVisualLayer(child) && !hasMeaningfulText(child) && child.absoluteBounds.width * child.absoluteBounds.height < parent.absoluteBounds.width * parent.absoluteBounds.height * 0.25;
-      roleById.set(child.id, backgrounds.includes(child.id) ? "background" : overlays.includes(child.id) ? "overlay" : atomicPaintLayer || smallVisualLayer ? "decoration" : "content");
+      roleById.set(child.id, child.isMask ? "decoration" : backgrounds.includes(child.id) ? "background" : overlays.includes(child.id) ? "overlay" : atomicPaintLayer || smallVisualLayer ? "decoration" : "content");
     }
     const flowChildren = ordered.filter(child => (roleById.get(child.id) ?? "content") === "content" && child.layoutPositioning !== "ABSOLUTE");
     const rows = groupRows(flowChildren);
@@ -385,8 +420,9 @@ export function generatePreview(input: unknown): PreviewBundle {
     const absolute = contentAbsoluteById.get(parent?.id ?? "") ?? false;
     const rotation = typeof node.rotation === "number" && node.renderAs !== "image" ? node.rotation : 0;
     const rotatedSize = rotation !== 0 && typeof node.width === "number" && typeof node.height === "number" ? { width: node.width, height: node.height } : null;
-    const nodeWidth = rotatedSize ? rotatedSize.width : node.absoluteBounds.width;
-    const nodeHeight = rotatedSize ? rotatedSize.height : node.absoluteBounds.height;
+    const imageBox = node.renderAs === "image" ? node.imagePlacement : null;
+    const nodeWidth = imageBox?.width ?? (rotatedSize ? rotatedSize.width : node.absoluteBounds.width);
+    const nodeHeight = imageBox?.height ?? (rotatedSize ? rotatedSize.height : node.absoluteBounds.height);
     const placement: Placement = { primitive: effectivePrimitive, role, align, previous, rowTop: rowTopValue, inRow, absolute, rotation };
     const paintOrder = parentPrimitive === "layered-flow" ? [`z-index:${paintOrderById.get(node.id) ?? 0}`] : [];
     const rules = [`width:${px(nodeWidth)}`, `height:${px(nodeHeight)}`, ...placementCSS(node, parent, placement), ...paintOrder, ...paintCSS(node, design), ...textCSS(node)];
@@ -397,7 +433,7 @@ export function generatePreview(input: unknown): PreviewBundle {
     });
     if (node.renderAs === "image") {
       const box = node.imagePlacement ?? { x: 0, y: 0, width: node.absoluteBounds.width, height: node.absoluteBounds.height };
-      cssRules.push(`.${classById.get(node.id)} > .d2c-asset { left:${px(box.x)}; top:${px(box.y)}; width:${px(box.width)}; height:${px(box.height)}; }`);
+      cssRules.push(`.${classById.get(node.id)} > .d2c-asset { left:0px; top:0px; width:${px(box.width)}; height:${px(box.height)}; }`);
     }
     const primitive = primitiveById.get(node.id);
     if (primitive) {

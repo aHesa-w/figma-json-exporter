@@ -96,3 +96,18 @@ test("complex gradient containers/strokes rasterize while simple linear fills re
   for (const n of result.data.nodes.slice(1, 6)) { assert.equal(n.renderAs, "image"); assert.equal(n.rasterReason, "complex-gradient"); assert.equal(n.children, undefined); }
   assert.deepEqual(result.data.nodes.map((n) => n.id), ["linear", "GRADIENT_RADIAL", "GRADIENT_ANGULAR", "GRADIENT_DIAMOND", "multi", "stroke"]);
 });
+
+test("supported linear-gradient text stays selectable and validates text clipping", async () => {
+  const paint = { type: "GRADIENT_LINEAR", gradientTransform: [[0, 1, 0], [-1, 0, 1]], gradientStops: [{ position: 0, color: { r: 1, g: 1, b: 1, a: 1 } }, { position: 1, color: { r: 1, g: .97, b: .59, a: 1 } }] };
+  const result = await pluginFixture([node("currency", { type: "TEXT", characters: "元", fills: [paint] })]).request("gradient-text");
+  const exported = result.data.nodes[0];
+  assert.equal(exported.renderAs, undefined);
+  assert.equal(exported.rasterReason, undefined);
+  assert.equal(exported.characters, "元");
+  assert.equal(result.imageCount, 0);
+
+  const textLayer = { ...layer(paint.gradientTransform), type: "TEXT", fills: exported.fills };
+  const target = linearGradient(textLayer);
+  assert.equal(validateGradient(textLayer, { ...styleFor(target), backgroundClip: "text" }).length, 0);
+  assert.equal(validateGradient(textLayer, styleFor(target))[0].property, "gradient-paint-box");
+});

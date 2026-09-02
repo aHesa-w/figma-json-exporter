@@ -75,6 +75,29 @@ export function createMCPServer(exporter: Exporter): McpServer {
     }
     return exporter.export(extra.signal, exportOptions).then(data => responseMode === "full" ? data : summarizeExport(data));
   }));
+  const optimizationGroupSchema = z.object({
+    parentId: z.string().min(1).max(256).describe("Exported source parent ID. The parent must be inside the current selection and outside an Instance subtree."),
+    name: z.string().trim().min(1).max(80).describe("Architectural group name, such as Header summary, Assets row, Main activity or Page background."),
+    childIds: z.array(z.string().min(1).max(256)).min(2).max(50).describe("A contiguous run of direct source children in original paint order. Group siblings first when their horizontal midlines are close, or when background/foreground layers form one visual section; non-contiguous children are rejected to protect paint order."),
+  });
+  server.registerTool("figma_optimize_selection", {
+    description: "MODEL-PLANNED FIGMA WRITE. First call figma_export on the live selection and inspect its hierarchy/geometry. Build an architectural hierarchy before sorting: group contiguous siblings whose horizontal midlines are close into rows, and group the background/foreground paint layers of one visual section. Then sort only those architecture groups and remaining independent nodes by their top-left anchors: top-to-bottom, and left-to-right within an approximate row. Supply this bounded plan using exported source IDs. The plugin verifies the current selection has not changed, creates a separate copy to the right, removes invisible and fully ancestor-clipped nodes from the copy, creates requested groups before parent reordering, and preserves paint order inside every group. Original nodes are never modified. Arbitrary JavaScript and arbitrary property writes are not accepted. Instance internals and mask-bearing containers are protected. Returns every created/mutated node ID and selects the optimized copies in Figma.",
+    inputSchema: {
+      expectedSelectionIds: z.array(z.string().min(1).max(256)).min(1).max(20).describe("Exact root IDs from the latest live figma_export. The operation fails if the current selection differs."),
+      copyName: z.string().trim().min(1).max(80).optional().describe("Suffix for copied roots; defaults to DOM优化."),
+      spacing: z.number().min(40).max(5000).optional().describe("Horizontal gap before the copied selection; defaults to 200 Figma pixels."),
+      plan: z.object({
+        summary: z.string().trim().min(20).max(2000).describe("Model explanation of the structural problems and intended DOM-like organization."),
+        removeInvisible: z.boolean().optional().describe("Defaults true. Removes invisible, zero-opacity and pixel-empty nodes from the copy, except protected Instance internals."),
+        reorderParentIds: z.array(z.string().min(1).max(256)).max(200).optional().describe("Containers chosen for Layers-panel normalization after architectural grouping. Groups and independent nodes are ordered by top-left anchor; overlap paint order remains protected inside each created group."),
+        ungroupNodeIds: z.array(z.string().min(1).max(256)).max(200).optional().describe("Redundant source GROUP IDs to dissolve in the copy. Frames and Instance internals are rejected."),
+        groups: z.array(optimizationGroupSchema).max(100).optional().describe("Architectural groups chosen before parent sorting. Prefer row groups based on near horizontal midlines and section groups that contain their layered background/foreground siblings. Each group must contain contiguous direct siblings so stacking cannot be silently changed."),
+        postGroups: z.array(optimizationGroupSchema).max(100).optional().describe("Exceptional final wrappers applied only after parent sorting. Use when two architecture members such as a section and its bottom layer are non-contiguous in raw paint order but become contiguous after the primary groups and reorder. The plugin still rejects them unless they are direct contiguous siblings at this final stage."),
+        rootArchitectureNodeIds: z.array(z.string().min(1).max(256)).max(100).optional().describe("Page architecture nodes such as a status/header bar or bottom/footer. These must remain direct children of an optimized selection root and cannot be absorbed into content groups."),
+        floatingNodeIds: z.array(z.string().min(1).max(256)).max(100).optional().describe("Independent overlay nodes that have no clear row-midline relationship, such as collapse controls or floating actions. They remain direct root children, are excluded from row grouping, and retain overlay paint priority."),
+      }),
+    },
+  }, async (args, extra) => result(() => exporter.optimize(extra.signal, args)));
   const assessmentItemSchema = z.object({
     description: z.string().trim().min(5).describe("Concrete preview decision or problem observed after reading/rendering the preview."),
     nodeIds: z.array(z.string().min(1)).min(1).describe("Exported data-d2c-id values affected by this observation."),

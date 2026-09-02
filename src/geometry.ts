@@ -104,6 +104,13 @@ export function validateLayout(designInput: unknown, actual: ActualLayout, toler
   if (actual?.coordinateSpace !== "root-relative" || !Array.isArray(actual.nodes)) throw new Error("Use the exported collector: actual geometry must be root-relative");
   const design = prepareDesign(designInput);
   const expected = flattenLayers(design);
+  const roots = new Map(design.nodes.map((node) => [node.id, node]));
+  const expectedBounds = (node: Layer): Rect => {
+    const root = roots.get(node.rootId)!;
+    const rootOrigin = root.renderAs === "image" && root.imageBounds ? root.imageBounds : root.absoluteBounds;
+    const bounds = node.renderAs === "image" && node.imageBounds ? node.imageBounds : node.absoluteBounds;
+    return rect({ x: bounds.x - rootOrigin.x, y: bounds.y - rootOrigin.y, width: bounds.width, height: bounds.height });
+  };
   const expectedIds = new Set(expected.map((n) => n.id));
   const actualById = new Map<string, ActualLayer>();
   const duplicates: string[] = [];
@@ -115,13 +122,14 @@ export function validateLayout(designInput: unknown, actual: ActualLayout, toler
   const missing: string[] = [];
   const fields = ["left", "top", "right", "bottom", "width", "height"] as const;
   const layers = expected.map((node) => {
+    const expectedRect = expectedBounds(node);
     const found = actualById.get(node.id);
     if (!found) {
       missing.push(node.id);
-      return { id: node.id, name: node.name, depth: node.depth, passed: false, reason: "missing", expected: node.relativeBounds };
+      return { id: node.id, name: node.name, depth: node.depth, passed: false, reason: "missing", expected: expectedRect };
     }
     const bounds = rect(found.bounds);
-    const delta = Object.fromEntries(fields.map((field) => [field, bounds[field] - node.relativeBounds[field]]));
+    const delta = Object.fromEntries(fields.map((field) => [field, bounds[field] - expectedRect[field]]));
     const maxError = Math.max(...Object.values(delta).map(Math.abs));
     const hierarchyMatches = found.rootId === node.rootId && found.parentId === node.parentId;
     const assetIds = node.assetId ? [node.assetId] : ["fills", "strokes"].flatMap((property) => {
@@ -147,7 +155,7 @@ export function validateLayout(designInput: unknown, actual: ActualLayout, toler
       id: node.id, name: node.name, depth: node.depth, parentId: node.parentId,
       passed: maxError <= tolerance && hierarchyMatches && imageMatches && lineHeightMatches && !propertyMismatches.length && found.visible === true && !duplicates.includes(node.id),
       reason: duplicates.includes(node.id) ? "duplicate-id" : !found.visible ? "hidden-in-implementation" : !hierarchyMatches ? "hierarchy-mismatch" : !imageMatches ? "image-missing-or-wrong-source" : !lineHeightMatches ? "line-height-mismatch" : propertyMismatches.length ? "rendering-property-mismatch" : maxError > tolerance ? "geometry-mismatch" : "matched",
-      expected: node.relativeBounds, actual: bounds, delta, maxError,
+      expected: expectedRect, actual: bounds, delta, maxError,
       missingAssets, propertyMismatches, ...(checkLineHeight ? { expectedLineHeight, actualLineHeight: actualLineHeight ?? null } : {}),
     };
   });

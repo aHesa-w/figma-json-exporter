@@ -147,11 +147,17 @@
         remoteRequestId = msg.requestId || null;
         remoteShapeGroupsAsImages = msg.shapeGroupsAsImages !== false;
         startExportInternal();
+      } else if (msg.type === "optimize") {
+        remoteRequestId = msg.requestId || null;
+        document.getElementById("exportBtn").disabled = true;
+        setStatus("模型已提交节点优化计划，正在 Figma 中创建副本...", "info");
+        parent.postMessage({ pluginMessage: { type: "optimize", requestId: remoteRequestId, request: msg.request } }, "*");
       }
     }
 
     function bindWsHandlers(c) {
       c.onopen = function() {
+        c.send(JSON.stringify({ type: "hello", pluginVersion: "3.5.0", features: ["export", "optimize-v1", "structure-font-fallback-v1", "layers-panel-order-v1", "clip-pruning-v1", "architecture-post-groups-v1", "root-architecture-floating-v1"] }));
         setMcpStatus(true);
         setStatus("MCP 已启动，可以由 Agent 调用当前 Figma 选区。", "success");
       };
@@ -373,6 +379,15 @@
           downloadJSON(data);
           setStatus("导出成功！" + nodeCount + " 个节点" + (imageCount === 0 ? "，无图片" : ""), "success");
           document.getElementById("exportBtn").disabled = false;
+        }
+      }
+
+      if (msg.type === "optimized") {
+        if (remoteRequestId) {
+          sendToMcp({ type: "optimized", requestId: remoteRequestId, data: msg.data });
+          setStatus("已创建并选中优化副本（原图层未修改）", "success");
+          document.getElementById("exportBtn").disabled = false;
+          remoteRequestId = null;
         }
       }
     };
